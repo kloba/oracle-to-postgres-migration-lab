@@ -138,8 +138,8 @@ suppliers, purchase orders, and a general ledger.
 | `SYNONYM` | 24 | 150 | 174 |
 | `FUNCTION` | 12 | 120 | 132 |
 | `PROCEDURE` | 10 | 100 | 110 |
-| `PACKAGE` | 25 | 60 | 85 |
-| `PACKAGE BODY` | 25 | 60 | 85 |
+| `PACKAGE` | 14 | 76 | 90 |
+| `PACKAGE BODY` | 14 | 76 | 90 |
 | `INDEX` | 78 | 0 | 78 |
 | `SEQUENCE` | 24 | 50 | 74 |
 | `TRIGGER` | 26 | 40 | 66 |
@@ -150,7 +150,7 @@ suppliers, purchase orders, and a general ledger.
 | `JOB` | 6 | 0 | 6 |
 | `PROGRAM` | 3 | 0 | 3 |
 | `SCHEDULE` | 3 | 0 | 3 |
-| **Total (design minimum)** | **350** | **760** | **1,110** |
+| **Total (design minimum)** | **328** | **792** | **1,120** |
 
 Those are the per-type minimums the build guarantees. A loaded `CONTOSO` runs larger — about
 **1,855 objects** by the rule the lab asserts, because the real count of nearly every type exceeds
@@ -165,7 +165,7 @@ About **1,480** of those are non-partition objects; the rest are subpartitions o
 composite-partitioned `inventory_movement`, so that slice of the count drifts with data volume. The
 binding requirement is the **1,000-object floor**, cleared with wide headroom.
 
-The 350 hand-written objects form a coherent, believable domain and carry **43 hard migration cases**
+The 328 hand-written objects form a coherent, believable domain and carry **43 hard migration cases**
 plus **14 additional traps**. The 792 generated objects come from a deterministic, seeded generator
 (`tools/generate-objects.py`) and exist to prove the converter still behaves at scale — about 15% of
 them deliberately embed a hard case, so scale testing stresses the difficult paths rather than 792
