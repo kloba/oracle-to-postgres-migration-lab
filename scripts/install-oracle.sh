@@ -256,7 +256,9 @@ ORACLE_GID=54321
 export DEBIAN_FRONTEND=noninteractive
 # Azure's Ubuntu images run unattended-upgrades at boot, which holds the dpkg
 # lock for minutes. Without this every apt-get in a cloud-init is a coin toss.
-APT_OPTS="-o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef"
+# An array (not a string) so the -o options word-split explicitly and safely,
+# rather than relying on unquoted IFS splitting that shellcheck flags (SC2086).
+APT_OPTS=(-o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef)
 
 # --------------------------------------------------------------------------
 # Secrets
@@ -317,7 +319,7 @@ validate_password() {
         *"'"*)  die "${var} contains a single quote" "pick a password without \" ' @ / \\ or spaces" ;;
         *'@'*)  die "${var} contains '@'" "sqlplus easy-connect strings split on '@'; choose another password" ;;
         *'/'*)  die "${var} contains '/'" "sqlplus easy-connect strings split on '/'; choose another password" ;;
-        *'\'*)  die "${var} contains a backslash" "pick a password without \" ' @ / \\ or spaces" ;;
+        *[\\]*) die "${var} contains a backslash" "pick a password without \" ' @ / \\ or spaces" ;;
         *[[:space:]]*) die "${var} contains whitespace" "pick a password without \" ' @ / \\ or spaces" ;;
     esac
     if [[ ${#value} -lt 8 ]]; then
@@ -360,8 +362,8 @@ step_docker_install() {
         ok "docker $(docker --version | awk '{print $3}' | tr -d ,) already installed and answering"
     else
         info "installing prerequisites"
-        apt-get $APT_OPTS update -qq
-        apt-get $APT_OPTS install -y -qq ca-certificates curl gnupg jq e2fsprogs util-linux >/dev/null
+        apt-get "${APT_OPTS[@]}" update -qq
+        apt-get "${APT_OPTS[@]}" install -y -qq ca-certificates curl gnupg jq e2fsprogs util-linux >/dev/null
 
         info "adding Docker's apt repository"
         install -m 0755 -d /etc/apt/keyrings
@@ -382,8 +384,8 @@ step_docker_install() {
         fi
 
         info "installing docker-ce (this pulls ~120 MB)"
-        apt-get $APT_OPTS update -qq
-        apt-get $APT_OPTS install -y -qq \
+        apt-get "${APT_OPTS[@]}" update -qq
+        apt-get "${APT_OPTS[@]}" install -y -qq \
             docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null \
             || die "docker-ce install failed" "see /var/log/apt/term.log and re-run ${SCRIPT_NAME}"
         ok "docker $(docker --version | awk '{print $3}' | tr -d ,) installed"
@@ -608,8 +610,11 @@ step_pull_image() {
         # failure here is not fatal - we have a usable image.
         if [[ "$ORACLE_IMAGE" == *:latest ]]; then
             info "refreshing the :latest tag (failure here is not fatal)"
-            docker pull -q "$ORACLE_IMAGE" >/dev/null 2>&1 \
-                && ok "refreshed" || warn "could not refresh; using the local copy"
+            if docker pull -q "$ORACLE_IMAGE" >/dev/null 2>&1; then
+                ok "refreshed"
+            else
+                warn "could not refresh; using the local copy"
+            fi
         fi
         return 0
     fi
@@ -968,7 +973,7 @@ alter user system identified by \"${ORACLE_SYSTEM_PASSWORD}\" account unlock;"
     # image does not set db_create_file_dest and a hardcoded path breaks the
     # moment Oracle changes its layout.
     local tbs_file
-    tbs_file="$(printf '%s' "$CONTOSO_TABLESPACE" | tr 'A-Z' 'a-z')01"
+    tbs_file="$(printf '%s' "$CONTOSO_TABLESPACE" | tr '[:upper:]' '[:lower:]')01"
     sql="whenever sqlerror exit failure
 alter session set container = ${ORACLE_SERVICE};
 declare
@@ -1252,6 +1257,11 @@ MARKER
     ok "wrote ${READY_MARKER}"
 }
 
+# Wired to EXIT with `trap on_failure EXIT` at the foot of this file. shellcheck
+# cannot see that indirect call, so it flags the body as unreachable (SC2317, on
+# 0.10.x) and the function as never-invoked (SC2329, added in 0.11.0). Both are
+# the same false positive; the directive is scoped to this one function.
+# shellcheck disable=SC2317,SC2329  # invoked via trap, not called directly
 on_failure() {
     local rc=$?
     [[ $rc -eq 0 ]] && return 0
