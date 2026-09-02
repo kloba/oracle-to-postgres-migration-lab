@@ -723,12 +723,17 @@ REPORT_LOG="${RUN_LOG_DIR}/999-report.log"
 REPORT_RC=0
 {
     preamble "$CONTOSO_SCHEMA" "$CONTOSO_PW"
+    # The PROMPT banners below must NOT end in '----'. A trailing hyphen is
+    # SQL*Plus's line-continuation character, so `PROMPT ... ----` swallows the
+    # next input line -- the SELECT that prints TOTAL_OBJECTS, or the BEGIN of the
+    # stats block -- leaving FROM/DBMS_STATS as orphan commands (SP2-0734 on a
+    # clean 23ai runner) and the seed exits with "the report query did not run".
     cat <<'REPORT'
 SET FEEDBACK OFF
 SET HEADING OFF
 WHENEVER SQLERROR CONTINUE
 PROMPT
-PROMPT ---- recompiling the schema before counting ----
+PROMPT ---- recompiling the schema before counting
 -- Loading ~25 files in dependency order still leaves a handful of objects
 -- INVALID, and they are not broken: a trigger created with FOLLOWS, or a body
 -- whose dependency was replaced later in the load, is marked invalid until
@@ -744,12 +749,12 @@ BEGIN
 END;
 /
 PROMPT
-PROMPT ---- object count (the contract's counting rule) ----
+PROMPT ---- object count (the contract's counting rule)
 SELECT 'TOTAL_OBJECTS=' || COUNT(*)
   FROM user_objects
  WHERE object_type NOT IN ('LOB','TABLE PARTITION','INDEX PARTITION','LOB PARTITION');
 PROMPT
-PROMPT ---- by type ----
+PROMPT ---- by type
 SET HEADING ON
 COLUMN object_type FORMAT A24
 COLUMN generated   FORMAT 999999
@@ -765,7 +770,7 @@ SELECT object_type,
  ORDER BY total DESC, object_type;
 SET HEADING OFF
 PROMPT
-PROMPT ---- invalid objects ----
+PROMPT ---- invalid objects
 SELECT 'INVALID_OBJECTS=' || COUNT(*) FROM user_objects WHERE status = 'INVALID';
 SET HEADING ON
 COLUMN object_name FORMAT A40
@@ -776,7 +781,7 @@ SELECT object_type, object_name
  FETCH FIRST 20 ROWS ONLY;
 SET HEADING OFF
 PROMPT
-PROMPT ---- row counts ----
+PROMPT ---- row counts
 BEGIN
   DBMS_STATS.GATHER_SCHEMA_STATS(ownname          => USER,
                                  estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE,
