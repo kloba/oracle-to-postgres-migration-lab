@@ -26,7 +26,7 @@
 #   7.  Raise the "sessions" parameter above 10 - the conversion tool's parallel
 #       metadata reads need it - and restart the instance, because "sessions" is
 #       static.
-#   8.  Create the CONTOSO schema owner with the privileges the ~1,820 hand
+#   8.  Create the CONTOSO schema owner with the privileges the ~1,855 hand
 #       written and generated objects need, and a quota big enough for the seed;
 #       create the low-privilege reader the conversion tool logs in as.
 #   9.  Write /var/log/contoso-oracle-ready so other scripts can poll for it.
@@ -1021,7 +1021,7 @@ whenever sqlerror exit failure"
 # --------------------------------------------------------------------------
 # Privileges for the schema owner.
 #
-# CONTOSO owns roughly 1,820 objects covering every object type the lab needs to
+# CONTOSO owns roughly 1,855 objects covering every object type the lab needs to
 # throw at the converter: types and type bodies, packages, materialised views
 # with refresh groups, scheduler jobs, contexts, dimensions, operators. Each of
 # those needs its own CREATE privilege, and RESOURCE does not include them.
@@ -1154,7 +1154,7 @@ grant select on sys.argument\$     to ${ORACLE_MIGRATION_USER};"
 # --------------------------------------------------------------------------
 # Assert the things the rest of the lab depends on. Anything that fails here
 # would otherwise surface hours later as an incomprehensible error halfway
-# through loading ~1,820 objects.
+# through loading ~1,855 objects.
 # --------------------------------------------------------------------------
 step_verify_schema() {
     local sql

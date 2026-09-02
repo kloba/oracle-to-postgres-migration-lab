@@ -309,10 +309,10 @@ for the four connections above in roughly that order, then for a scope.
 sample schemas add thousands of objects that are not yours to migrate and will dominate both your
 token bill and your report.
 
-The tool will enumerate the source. It reports the schema's real objects — **around 1,450** — which
-is fewer than the **~1,820** that `99-verify-objects.sql` counts under the contract rule, because
+The tool will enumerate the source. It reports the schema's real objects — **around 1,480** — which
+is fewer than the **~1,855** that `99-verify-objects.sql` counts under the contract rule, because
 that rule also counts the composite-partition subpartitions and the converter does not. Both clear
-the contract floor of 1,000 (the per-type design budget is 1,110). Take the exact figure from your
+the contract floor of 1,000 (the per-type design budget is 1,120). Take the exact figure from your
 own seed run rather than from this page; it moves as the generated half is tuned and as data volume
 changes the subpartition count. If it reports drastically fewer, the project is either scoped to the
 wrong schema or connected as an account without `SELECT_CATALOG_ROLE`.
@@ -328,7 +328,7 @@ accident across the whole schema.
 
 ## 5. Run the schema conversion
 
-Start the conversion and leave it alone. On ~1,450 convertible objects at 500,000 TPM, expect
+Start the conversion and leave it alone. On ~1,480 convertible objects at 500,000 TPM, expect
 **45–90 minutes**. On lower quota, considerably longer — it does not fail, it backs off.
 
 What you should see happening, in order:
@@ -466,15 +466,15 @@ These are more dangerous than the review tasks, because nothing flags them.
 | **H-30** | `ROWNUM` versus `ROW_NUMBER()` | The naive `LIMIT` conversion returns a **different set of rows**, not just a different order. `ROWNUM` is applied before `ORDER BY` |
 | **H-32** | Oracle `(+)` outer joins | `v_legacy_orders` uses them throughout. Converting `(+)` to the wrong side of a `LEFT JOIN` produces a query that runs and answers differently |
 | **H-33** | The `LONG` column | `store.legacy_migration_notes`. Also the reason [04](04-migrate-data.md) is not a one-liner |
-| **H-37** | `TIMESTAMP WITH LOCAL TIME ZONE` | 119 columns in the reference build. Oracle normalises to the session zone on read; `timestamptz` does not behave identically |
+| **H-37** | `TIMESTAMP WITH LOCAL TIME ZONE` | 143 columns in the reference build — assertion `A6-l` in [`tests/verify-schema.sql`](../tests/verify-schema.sql) prints the count for *your* build. Oracle normalises to the session zone on read; `timestamptz` does not behave identically |
 | **H-06** | `CONNECT BY` over four hierarchies | Becomes a recursive CTE. `CONNECT BY NOCYCLE`, `LEVEL` and `SYS_CONNECT_BY_PATH` each need separate handling |
 | **T-06** | Optimiser hints | `/*+ INDEX(...) */` is a comment to PostgreSQL. Silently ignored, no error, different plan |
 | **T-09** | `SYSDATE` versus `now()` | `SYSDATE` does not advance within a statement; `clock_timestamp()` does, `now()` does not. Picking the wrong one changes audit timestamps |
 
 ### And then there is the generated half
 
-About 15% of the ~760 generated objects deliberately embed one of these same constructs. That is
-the point of them: a converter facing 760 copies of one easy template is pattern-matching, not
+About 15% of the ~792 generated objects deliberately embed one of these same constructs. That is
+the point of them: a converter facing 792 copies of one easy template is pattern-matching, not
 translating. Watch whether the tool's success rate on the generated half matches its success rate
 on the hand-written half. If it is much higher, it found a template. If it is much lower, scale
 itself is degrading quality — which is a more interesting finding than either.

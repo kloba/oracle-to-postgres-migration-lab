@@ -128,7 +128,7 @@ param foundryModelName string = 'gpt-5.2'
 @description('Model version. Leave empty to let Azure pick the current default for foundryModelName.')
 param foundryModelVersion string = ''
 
-@description('Deployment capacity in thousands of tokens per minute. 500 means the recommended 500,000 TPM; below that a ~1,820-object schema throttles badly.')
+@description('Deployment capacity in thousands of tokens per minute. 500 means the recommended 500,000 TPM; below that a ~1,855-object schema throttles badly.')
 param foundryModelCapacity int = 500
 
 // -- Jumpbox -----------------------------------------------------------------

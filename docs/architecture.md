@@ -220,7 +220,7 @@ seriously it takes ordering.
 Type mappings, storage clauses, sequence options and most constraint syntax have exactly one correct
 translation. Running those through a model would be slower, more expensive, and *less* reliable —
 a model that translates `VARCHAR2(30)` correctly 99.9% of the time is worse than a lookup table that
-does it correctly every time, because you have ~1,820 objects and 0.1% is one silent defect.
+does it correctly every time, because you have ~1,855 objects and 0.1% is one silent defect.
 
 This is the single most important architectural point about the tool: **the LLM is used where
 determinism is impossible, not everywhere.**
@@ -229,7 +229,7 @@ determinism is impossible, not everywhere.**
 
 Foundry, in your subscription, on your quota. What lands here is the genuinely hard material: PL/SQL
 procedural bodies, hierarchical queries, collection semantics, trigger restructuring, dynamic SQL.
-This is why 500,000 TPM is the recommendation and why a ~1,820-object schema throttles badly below
+This is why 500,000 TPM is the recommendation and why a ~1,855-object schema throttles badly below
 it.
 
 Model choice is one of the two conflicts the lab records rather than hides: Learn documents
@@ -390,12 +390,12 @@ loop's failure modes only appear in bulk. A thousand is also roughly where the r
 something you read end to end and starts being something you have to query — which is itself a
 finding about the workflow.
 
-**Why the split is ~350 hand-written and ~760 generated.** The hand-written core is a coherent
+**Why the split is ~350 hand-written and ~792 generated.** The hand-written core is a coherent
 retail domain: ten subject areas, 45 core tables, four separate hierarchies, real business logic in
 25 packages. It has to be believable, because a converter facing plausible code behaves differently
 from one facing obvious test fixtures. The generated bulk provides scale without asking anyone to
-hand-write 760 more objects — and about 15% of the generated objects deliberately carry a hard case,
-so scale testing stresses the difficult paths rather than 760 copies of the easy one.
+hand-write 792 more objects — and about 15% of the generated objects deliberately carry a hard case,
+so scale testing stresses the difficult paths rather than 792 copies of the easy one.
 
 **Why the generator is deterministic.** Same `GEN_SEED`, byte-identical output, on any machine. The
 lab's value comes from diffing conversion reports — across runs, across models, across extension
@@ -411,8 +411,8 @@ SELECT COUNT(*) FROM user_objects
 Partition and LOB segments are storage artefacts, not constructs a converter has to reason about.
 Counting them would let the lab hit its target by adding partitions instead of adding difficulty,
 and the total would drift with the seed date because three tables are interval-partitioned. The
-per-type budget sums to 1,110 against a floor of 1,000, and a loaded schema runs higher still —
-about **1,820** by this rule, of which roughly **1,450** are non-partition objects and the rest
+per-type budget sums to 1,120 against a floor of 1,000, and a loaded schema runs higher still —
+about **1,855** by this rule, of which roughly **1,480** are non-partition objects and the rest
 subpartitions that move with data volume. The budget exists to guarantee the 1,000 floor by
 construction; a lab that only just cleared it would be one that fails on somebody else's machine.
 
@@ -437,7 +437,7 @@ order tables makes it the schedule risk it really is.
 | Private access, no public endpoint | Public endpoint plus firewall rules | Matches what a security review would demand, and forces the jumpbox pattern to be real |
 | NAT gateway | Default outbound access | Azure retired default outbound in September 2025. Without it, image pulls and Marketplace hang |
 | Windows x64 jumpbox by default | Run VS Code locally | ARM64 is unsupported on Windows and Linux, and the thick-client documentation says "Windows and Linux only". Removes a class of platform debugging |
-| Deterministic Python generator, stdlib only | Faker, or hand-writing 760 objects | Byte-identical output across machines; no PyPI egress needed on the jumpbox |
+| Deterministic Python generator, stdlib only | Faker, or hand-writing 792 objects | Byte-identical output across machines; no PyPI egress needed on the jumpbox |
 | Predictions written before measurement | Reporting only what happened | Makes the lab falsifiable, and makes an implausibly good result recognisable |
 | Conflicts documented, not resolved | Quietly picking a side | Two upstream conflicts (model name, RBAC role name) are genuinely unresolved. Readers hitting them deserve to know they are not going mad |
 | `ora2pg` as the data step | Pretending the tool moves data | It does not. Any end-to-end story that implies otherwise is wrong |

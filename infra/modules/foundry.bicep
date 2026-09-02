@@ -15,7 +15,7 @@
 //
 //   Quota.  500,000 TPM is the recommended capacity. modelCapacity is expressed
 //           in thousands of tokens per minute, so the default of 500 is
-//           500,000 TPM. Below that, a schema of ~1,820 objects throttles badly
+//           500,000 TPM. Below that, a schema of ~1,855 objects throttles badly
 //           and the run takes hours instead of minutes.
 //
 // RBAC is deliberately not done here. Current Foundry docs name the role
@@ -50,7 +50,7 @@ param modelVersion string = ''
 @description('Model publisher format.')
 param modelFormat string = 'OpenAI'
 
-@description('Deployment capacity in thousands of tokens per minute. 500 means 500,000 TPM, which is the recommended quota for a ~1,820-object schema.')
+@description('Deployment capacity in thousands of tokens per minute. 500 means 500,000 TPM, which is the recommended quota for a ~1,855-object schema.')
 @minValue(1)
 param modelCapacity int = 500
 

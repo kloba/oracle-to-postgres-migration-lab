@@ -241,7 +241,7 @@ require_var PG_TARGET_SCHEMA   "target PostgreSQL schema"
 
 hdr "Credentials"
 require_secret ORACLE_SYSTEM_PASSWORD    "Oracle SYSTEM account used by src/oracle/00-user-tablespace.sql"
-require_secret CONTOSO_PASSWORD          "owner of all ~1,820 objects"
+require_secret CONTOSO_PASSWORD          "owner of all ~1,855 objects"
 require_secret ORACLE_MIGRATION_PASSWORD "the low-privilege O2P_READER account the converter uses"
 
 if [[ "$SKIP_AZURE" -eq 0 ]]; then
@@ -597,7 +597,7 @@ else
                     else
                         fail "${CS_NAME}: only ${CS_AVAIL} of ${CS_LIMIT} kTPM free, wants ${NEED_KTPM} kTPM" \
                              "raise the quota in Foundry portal > Management > Quota, or lower FOUNDRY_TPM_QUOTA"
-                        note "below ~500k TPM the converter throttles hard across a ~1,820-object schema (docs/design.md 11.6)"
+                        note "below ~500k TPM the converter throttles hard across a ~1,855-object schema (docs/design.md 11.6)"
                     fi
                 fi
             fi

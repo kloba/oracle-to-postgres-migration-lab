@@ -215,7 +215,7 @@ diff. Not "does the query run" — **does it return the same rows**.
 # out/ is gitignored, so your working queries stay out of the repo.
 mkdir -p out/validate
 
-./scripts/connect.sh oracle-azure -c "@out/validate/q01.sql" > out/validate/q01.oracle.txt
+./scripts/connect.sh oracle-azure -c "$(cat out/validate/q01.sql)" > out/validate/q01.oracle.txt
 ./scripts/connect.sh postgres     -c "$(cat out/validate/q01.pg.sql)" > out/validate/q01.pg.txt
 diff out/validate/q01.oracle.txt out/validate/q01.pg.txt && echo "q01 MATCH"
 ```

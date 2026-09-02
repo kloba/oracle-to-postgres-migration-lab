@@ -93,7 +93,7 @@ param foundryModelVersion = readEnvironmentVariable('FOUNDRY_MODEL_VERSION', '')
 // the Foundry quota blade shows. Divide here so the two deployment paths agree:
 // scripts/deploy.sh reads the same FOUNDRY_TPM_QUOTA and does the same
 // `/ 1000`. Bicep `/` on integers truncates, matching bash $(( )).
-// Lowering FOUNDRY_TPM_QUOTA below ~200000 throttles a ~1,820-object schema badly.
+// Lowering FOUNDRY_TPM_QUOTA below ~200000 throttles a ~1,855-object schema badly.
 param foundryModelCapacity = int(readEnvironmentVariable('FOUNDRY_TPM_QUOTA', '500000')) / 1000
 
 // -- Jumpbox -----------------------------------------------------------------

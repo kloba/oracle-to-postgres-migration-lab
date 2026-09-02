@@ -76,7 +76,7 @@ digraph contoso_lab {
           <tr><td align="left"><b>o2p-oracle-vm</b></td></tr>
           <tr><td align="left"><font point-size="9">Ubuntu 22.04 · Standard_D4s_v5</font></td></tr>
           <tr><td align="left"><font point-size="9">Oracle Database Free 23ai (Docker)</font></td></tr>
-          <tr><td align="left"><font point-size="9">schema CONTOSO · ~1,820 objects</font></td></tr>
+          <tr><td align="left"><font point-size="9">schema CONTOSO · ~1,855 objects</font></td></tr>
           <tr><td align="left"><font point-size="9" color="#A4262C">no public IP</font></td></tr>
           <tr><td align="left"><font point-size="9" color="#8A5A00"><b>the simulated on-premises source</b></font></td></tr>
         </table>>];

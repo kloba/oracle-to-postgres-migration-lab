@@ -1,6 +1,6 @@
 # Contoso Store — Oracle to Azure Database for PostgreSQL migration lab
 
-A deliberately awkward, ~1,820-object Oracle schema for a fictional multi-country retailer, and a
+A deliberately awkward, ~1,855-object Oracle schema for a fictional multi-country retailer, and a
 complete lab for putting it through the only currently supported Microsoft path to Azure Database
 for PostgreSQL — the AI-assisted schema and code conversion built into the **PostgreSQL extension
 for Visual Studio Code**. The schema is not a demo. It is twenty years of accreted retail ERP
@@ -19,7 +19,7 @@ what a human still has to do.
 > That is the sanctioned starting point, and it is the right first stop if you are new to the tooling.
 >
 > This repo is a community companion, not a replacement. The difference is the source database: the
-> Learn lab uses a small sample schema, while this one hands the same tooling ~1,820 objects of
+> Learn lab uses a small sample schema, while this one hands the same tooling ~1,855 objects of
 > deliberately hostile PL/SQL and asks what survives. Do the Learn module first, then bring the
 > tooling here when you want to know how it behaves at customer scale.
 
@@ -101,7 +101,8 @@ just a language model's guess written to a file.
 > container on your machine. It is genuinely useful for iterating on SQL and for CI, and it is
 > cheap. It also exercises none of the network story — no Bastion, no private endpoint, no NSG, no
 > realistic latency between the client and the source. Use it to get the schema right; use the VM
-> for the actual lab.
+> for the actual lab. See [Local-only quickstart](#local-only-quickstart) below, or
+> [02 — Seed the Oracle source](docs/02-seed-oracle.md#1-before-you-start) for the full local setup.
 
 ---
 
@@ -152,7 +153,7 @@ suppliers, purchase orders, and a general ledger.
 | **Total (design minimum)** | **350** | **760** | **1,110** |
 
 Those are the per-type minimums the build guarantees. A loaded `CONTOSO` runs larger — about
-**1,820 objects** by the rule the lab asserts, because the real count of nearly every type exceeds
+**1,855 objects** by the rule the lab asserts, because the real count of nearly every type exceeds
 its minimum:
 
 ```sql
@@ -160,14 +161,14 @@ SELECT COUNT(*) FROM user_objects
  WHERE object_type NOT IN ('LOB','TABLE PARTITION','INDEX PARTITION','LOB PARTITION');
 ```
 
-About **1,450** of those are non-partition objects; the rest are subpartitions of the
+About **1,480** of those are non-partition objects; the rest are subpartitions of the
 composite-partitioned `inventory_movement`, so that slice of the count drifts with data volume. The
 binding requirement is the **1,000-object floor**, cleared with wide headroom.
 
 The 350 hand-written objects form a coherent, believable domain and carry **43 hard migration cases**
-plus **14 additional traps**. The 760 generated objects come from a deterministic, seeded generator
+plus **14 additional traps**. The 792 generated objects come from a deterministic, seeded generator
 (`tools/generate-objects.py`) and exist to prove the converter still behaves at scale — about 15% of
-them deliberately embed a hard case, so scale testing stresses the difficult paths rather than 760
+them deliberately embed a hard case, so scale testing stresses the difficult paths rather than 792
 copies of an easy template.
 
 A sample of what is in there, and what the lab predicts will happen to it:
@@ -197,7 +198,8 @@ You need an Azure subscription, a GitHub Copilot **Pro+/Business/Enterprise** se
 git clone https://github.com/<your-fork>/oracle-to-postgres-migration-lab.git
 cd oracle-to-postgres-migration-lab
 
-# 2. Configure. Replace every replace-me-* and changeme value.
+# 2. Configure. Replace every replace-me-* value, the changeme in AZ_KEYVAULT_NAME, and the
+#    all-zero AZ_SUBSCRIPTION_ID (az account show --query id -o tsv).
 cp .env.example .env
 chmod 600 .env
 $EDITOR .env
@@ -226,6 +228,33 @@ Between steps 5 and 6, give the Oracle VM 10 to 20 minutes: cloud-init is pullin
 container image and creating the database. `ssh … 'sudo cloud-init status --wait'` tells you when it
 is done.
 
+### Local-only quickstart
+
+To iterate on just the Oracle schema — no Azure, nothing billable — run the source in a local
+container. This exercises none of the network story (no Bastion, no private endpoint, no realistic
+latency), but it is fast and free.
+
+```bash
+# 1. Configure. For --local, only ORACLE_SYSTEM_PASSWORD and CONTOSO_PASSWORD in .env matter.
+cp .env.example .env && chmod 600 .env && $EDITOR .env
+
+# 2. Start Oracle Free in Docker. Load .env first so the container name, port and
+#    password come from it. On Apple Silicon the amd64-only image runs under emulation.
+set -a; . ./.env; set +a
+docker run -d --name "$ORACLE_CONTAINER_NAME" -p "$ORACLE_PORT:1521" \
+  -e ORACLE_PASSWORD="$ORACLE_SYSTEM_PASSWORD" gvenzl/oracle-free:23-slim
+docker logs -f "$ORACLE_CONTAINER_NAME"   # wait for DATABASE IS READY TO USE!
+
+# 3. Seed at smoke scale and prove the object count crossed the floor (~3 min).
+./scripts/seed-oracle.sh --local --scale 0.01
+
+# 4. Run the assertions against it.
+./tests/run-tests.sh --local --scale 0.01
+```
+
+Full detail — choosing a scale, reset and re-seed, troubleshooting — is in
+[02 — Seed the Oracle source](docs/02-seed-oracle.md#1-before-you-start).
+
 ---
 
 ## How long it takes
@@ -239,10 +268,10 @@ Realistic, assuming things mostly work. First time through, add reading time.
 | Deploy infrastructure | [01](docs/01-deploy-infrastructure.md) | 5 min | 20–30 min | Bastion and the PostgreSQL restart dominate |
 | Oracle first boot | [01](docs/01-deploy-infrastructure.md) | 0 | 10–20 min | cloud-init pulls the image and creates the database |
 | Post-deploy config | [01](docs/01-deploy-infrastructure.md) | 10 min | 2 min | Extensions, the Foundry role assignment, outputs into `.env` |
-| Seed Oracle (`--scale 0.01`) | [02](docs/02-seed-oracle.md) | 2 min | 6–9 min | Smoke test |
+| Seed Oracle (`--scale 0.01`) | [02](docs/02-seed-oracle.md) | 1 min | 2–3 min | Local smoke test, ~3 min measured; slower on Azure over the tunnel |
 | Seed Oracle (`--scale 1`) | [02](docs/02-seed-oracle.md) | 2 min | 35–50 min | The real thing |
 | Client setup | [00](docs/00-prerequisites.md) | 20 min | 10 min | VS Code + extension + Copilot sign-in on the jumpbox |
-| Run the conversion | [03](docs/03-run-ai-migration.md) | 15 min | 45–90 min | ~1,450 convertible objects at 500,000 TPM. Much longer on lower quota |
+| Run the conversion | [03](docs/03-run-ai-migration.md) | 15 min | 45–90 min | ~1,480 convertible objects at 500,000 TPM. Much longer on lower quota |
 | Work the review tasks | [03](docs/03-run-ai-migration.md) | **3–8 h** | — | The actual lab. Roughly a dozen genuinely hard items |
 | Migrate the data | [04](docs/04-migrate-data.md) | 20 min | 30–90 min | `ora2pg` at scale 1. The `LONG` column will cost you some of this |
 | Validate | [05](docs/05-validate.md) | 1–2 h | 15 min | Differential testing is where the interesting findings are |
@@ -266,7 +295,7 @@ put in a budget.
 | Windows jumpbox | `Standard_D4s_v5`, Windows (licence included) | $0.37 | **$8.90** |
 | PostgreSQL flexible server | `Standard_D4ds_v5`, General Purpose, 4 vCore | $0.27 | **$6.43** |
 | Azure Bastion | **Standard** (Basic cannot tunnel — see below) | $0.29 | **$6.96** |
-| Managed disks | 3 × Premium SSD, ~320 GiB total | — | **$1.75** |
+| Managed disks | 3 × Premium SSD, 448 GiB total — Oracle 64 OS + 128 data, jumpbox 256 OS | — | **$2.46** |
 | PostgreSQL storage | 128 GiB + 7-day backups | — | **$0.60** |
 | NAT gateway | Gateway hours + data processing | $0.045 | **$1.08** |
 | Public IP addresses | 2 × Standard static (Bastion, NAT) | — | **$0.24** |
@@ -289,7 +318,7 @@ costs nothing. Everything else in the first table bills for existing.
 
 | Scenario | Per day | Per 30 days |
 | --- | ---: | ---: |
-| Lab running 24/7 | ~$31 | **~$920** |
+| Lab running 24/7 | ~$31 | **~$940** |
 | Paused overnight — VMs deallocated, PostgreSQL stopped | ~$10 | ~$290 |
 | Destroyed | **$0** | **$0** |
 

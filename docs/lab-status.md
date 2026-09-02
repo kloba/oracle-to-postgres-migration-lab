@@ -23,20 +23,29 @@ Read this before you spend money.
 Everything in this section was run on a developer machine (macOS 14, Apple Silicon, Docker Desktop,
 `bash` 3.2, Python 3.14, Azure CLI logged in) on 2026-09-02, and the output inspected.
 
-### 1.1 The static test suite — all 8 checks pass
+### 1.1 The test suite — 8 static checks pass, and all 10 pass against a local seed
 
-`./tests/run-tests.sh` with no target flag, and again as CI runs it:
+`./tests/run-tests.sh` with no target flag runs the 8 static checks. CI runs the same set as
+`--strict`, which raises shellcheck to `severity=style` and turns any SKIP into a failure.
+`./tests/run-tests.sh --local` adds the two Oracle assertion suites against the seeded container.
+All three invocations were run on 2026-09-02 and all three exited 0. The Detail column below is the
+harness's own, with the tool named where the line alone would not say it:
 
 | Check | Result | Detail |
 | --- | --- | --- |
-| `bash-syntax` | PASS | 8 scripts parse under `bash -n` |
-| `shellcheck` | PASS | 8 scripts clean at `severity=warning`, shellcheck v0.10.0 |
-| `exec-bits` | PASS | 8 shell scripts executable |
-| `bicep-build` | PASS | 8 templates compile under `az bicep build` |
-| `python-compile` | PASS | both generators compile |
-| `generator-determinism` | PASS | 13 files byte-identical across two different `PYTHONHASHSEED`s |
-| `markdown-links` | PASS | 100 relative links across 12 files, 0 broken |
-| `secret-scan` | PASS | no real GUIDs, no tracked `.env` |
+| `bash-syntax` | PASS | 9 script(s) parse under `bash -n` |
+| `shellcheck` | PASS | 9 clean at `severity=warning`; under CI's `--strict`, 9 clean at `severity=style`. CI pins shellcheck v0.11.0 |
+| `exec-bits` | PASS | 9 script(s) executable |
+| `bicep-build` | PASS | 8 template(s) compile |
+| `python-compile` | PASS | 2 file(s) compile |
+| `generator-determinism` | PASS | 13 file(s) byte-identical across two different `PYTHONHASHSEED`s |
+| `markdown-links` | PASS | 0 broken, of 105 relative link(s) checked in 12 file(s). The link count moves with every doc edit; the 0 is the claim |
+| `secret-scan` | PASS | no real GUIDs or tracked `.env` |
+| `verify-schema` | PASS (`--local`) | all assertions passed — `41 passed, 0 failed, 0 not checked` |
+| `verify-counts` | PASS (`--local`) | all assertions passed — `64 passed, 0 failed, 0 not checked (scale 0.01)` |
+
+`./tests/run-tests.sh --local` ends in `10 passed, 0 failed, 0 skipped`. The last two rows are the
+ones that changed: this page used to report four failing assertions and a non-zero exit. See §1.9.
 
 ### 1.2 The Oracle schema genuinely builds, and is genuinely large
 
@@ -45,7 +54,9 @@ The full seed was executed end to end against a local Oracle Free 23ai container
 
 - **1,855 objects** by the contract's counting rule
   (`user_objects` excluding `LOB`, `TABLE PARTITION`, `INDEX PARTITION`, `LOB PARTITION`).
-- **1,448 objects** if you also exclude `TABLE SUBPARTITION` and `INDEX SUBPARTITION`.
+- **1,480 objects** if you also exclude `TABLE SUBPARTITION` and `INDEX SUBPARTITION` — the figure
+  `verify-schema.sql` prints as the A1 info line, `excluding subpartitions too`, and the same figure
+  §3.1 quotes.
 - **The 1,000-object floor is met on either interpretation.** This is the binding requirement and it
   passes with large headroom.
 - **0 objects with status `INVALID`.** Nothing in the schema is a compilation stub.
@@ -157,6 +168,34 @@ of `bicep build` or `shellcheck` would have surfaced. Both are now fixed in `scr
 These are precisely the class of defect that §2's warnings exist to flag as *possible*. Deploying
 turned two of them from "possible" into "found and fixed".
 
+### 1.9 The four failing assertions this page used to report do not reproduce
+
+Until 2026-09-02 this page reported four failures — `PACKAGE` and `PACKAGE BODY` short of their
+design minimum in `verify-schema.sql`, and `B2-e` (negative stock) and `B2-o` (unbalanced GL
+journals) in `verify-counts.sql` — and concluded that the repo did not pass its own test suite.
+All four were re-measured on 2026-09-02 against the local Oracle container, seeded at `--scale 0.01`.
+**None of them reproduce.**
+
+| Formerly reported here | Measured 2026-09-02 |
+| --- | --- |
+| `PACKAGE` 74 and `PACKAGE BODY` 74, against a design minimum of 85 | **90 and 90**, `ok` — 14 hand-written pairs plus 76 generated |
+| `B2-e` "no negative `qty_on_hand`" fails on 80 rows | **PASS** — `80 of 3200 negative (expect 80), 0 past -30` |
+| `B2-o` "every GL journal balances" reports 800 unbalanced of 801 rows | **PASS** — `0 unbalanced journals`. Queried straight at the database: 801 journals, 2,400 lines, 0 where `SUM(debit_amount) <> SUM(credit_amount)` |
+| `tests/run-tests.sh --local` exits non-zero | **Exits 0** — `10 passed, 0 failed, 0 skipped` (§1.1) |
+
+The cause was a stale record, not a late fix. The generator has budgeted **76** generated package
+pairs (60 nominal plus 16 supplemental) since the first commit. `B2-e` has been a *bounded*
+assertion since the first commit rather than a "must be zero" one: the deliberate negative stock in
+`generated/oracle/data/09-data-inventory.sql` must be exactly one row in forty and none past the
+generator's −30 floor, so a seeder that silently produced none, or a wild `-1e9`, still fails it.
+And the finance generator derives each journal's last line to offset the sum of the others, so
+every journal balances by construction. Those numbers were taken from an earlier build of the
+schema and never re-measured. §7 warns about a status page that only ever gains green checkmarks;
+one that keeps red marks it has already fixed is just as untrustworthy.
+
+**Still true, and not fixed by any of this:** these are assertions about the *Oracle* side. Nothing
+here says anything about the conversion, which has still never run (§2.2).
+
 ---
 
 ## 2. NOT verified — do not assume these work
@@ -234,55 +273,29 @@ Microsoft's documentation. No client was set up and no extension was installed.
 
 These are real inconsistencies found by inspection. None of them break the build. Several have since
 been fixed and are marked **Resolved** inline (dated); the rest will still mislead a careful reader.
+Three entries that used to sit here — the short `PACKAGE` count and the two `verify-counts.sql` data
+assertions — were re-measured on 2026-09-02, no longer fail, and have moved to §1.9 with their
+numbers.
 
-### 3.1 Object count — resolved: docs now state ~1,820, with 1,110 kept only as the design budget
+### 3.1 Object count — resolved: docs state ~1,855, with 1,120 kept only as the design budget
 
 The README headline, the architecture diagram, `docs/design.md` and roughly **18 other places** used
-to call this a "1,110-object" schema, presenting the **per-type design budget** (the minimums in the
-README / `design.md` section 8 table, which sum to 1,110) as if it were the live object count. The
-measured count is **1,855** by the contract's counting rule (§1.2), of which **1,480** are
-non-partition objects; the remainder are subpartitions of composite-partitioned `inventory_movement`
-that drift with data volume. Actual per-type counts exceed nearly every design minimum (`INDEX`
-332 vs 78, `TABLE` 108 vs 64, `VIEW` 208 vs 198).
+to present the **per-type design budget** (the minimums in the `design.md` section 8 table — then
+1,110, now **1,120**) as if it were the live object count. The measured count is **1,855** by the
+contract's counting rule (§1.2), of which **1,480** are non-partition objects; the remainder are
+subpartitions of composite-partitioned `inventory_movement` that drift with data volume. Actual
+per-type counts exceed nearly every design minimum (`INDEX` 332 vs 78, `TABLE` 108 vs 64,
+`VIEW` 208 vs 198).
 
-**Resolved (2026-09-02):** the docs now use **~1,820** as the headline, add the ~1,450-non-partition /
-subpartition-drift note wherever the number is explained, keep **1,110** only where it is explicitly
-the design budget, and describe the 1,000 floor as comfortably cleared. `docs/02-seed-oracle.md`'s
-sample transcript now prints `TOTAL_OBJECTS=1855` and an abridged real census. The 1,000 floor
-remains the only asserted figure (`src/oracle/99-verify-objects.sql`), which still reports 1,110 as
-its design target — correct, since that is the budget. Take the exact figure from your own seed run;
-it moves as the generated half is tuned and with data volume.
+**Resolved (2026-09-02):** the docs now use **~1,855** as the headline, add the ~1,480-non-partition /
+subpartition-drift note wherever the number is explained, keep the **1,120** design budget only where
+the budget is explicitly meant, and describe the 1,000 floor as comfortably cleared.
+`docs/02-seed-oracle.md`'s sample transcript now prints `TOTAL_OBJECTS=1855`. The 1,000 floor remains
+the only asserted figure (`src/oracle/99-verify-objects.sql`, which still prints its design-target
+constant next to the live count). Take the exact figure from your own seed run; it moves as the
+generated half is tuned and with data volume.
 
-### 3.2 `verify-schema.sql` fails 2 of 41 assertions — `PACKAGE` and `PACKAGE BODY` are short
-
-| Type | Actual | Design minimum | Gap |
-| --- | ---: | ---: | ---: |
-| `PACKAGE` | 74 | 85 | −11 |
-| `PACKAGE BODY` | 74 | 85 | −11 |
-
-This is scale-independent and reproducible. Either the generator should emit 11 more package pairs
-or `docs/design.md` should lower the figure. **`tests/run-tests.sh --local` exits non-zero because
-of this**, so the repo does not currently pass its own full test suite.
-
-### 3.3 `verify-counts.sql` contradicts the deliberately-messy seed data
-
-`generated/oracle/data/14-data-messy-edge-cases.sql` **intentionally** inserts negative stock, and
-says so in a comment: *"Retail books negative stock every day: shrink, write-off, reversal … Any
-converted report that assumes non-negative quantities is wrong before it runs."*
-
-`tests/verify-counts.sql` assertion **B2-e "no negative qty_on_hand"** then fails on exactly that
-data (80 rows). One of the two is wrong. This is a design decision, not a typo.
-
-### 3.4 800 of 801 GL journals do not balance
-
-Assertion **B2-o "every GL journal balances"** reports **800 unbalanced journals** out of 801 rows.
-Unlike §3.3 this does **not** appear to be deliberate — the messy-data file only adds one journal,
-for an unrelated `DATE`-truncation case, and nothing documents unbalanced journals as intentional.
-This looks like a genuine defect in the finance data generation in
-`generated/oracle/data/13-data-finance.sql`. A trial-balance query (question Q8 in
-`docs/05-validate.md`) will produce nonsense until it is fixed.
-
-### 3.5 Test-harness scale — resolved: the harness now detects the scale
+### 3.2 Test-harness scale — resolved: the harness now detects the scale
 
 `tests/run-tests.sh --local` used to default to `--scale 1`; run against a `--scale 0.01` seed it
 produced **31 failures, 24 of them pure scale mismatch** ("SHORT" row counts), which trains a reader
@@ -292,10 +305,10 @@ to ignore failures.
 `sales_order` volume and either **auto-selects** the matching named scale when `--scale` was not
 given, or **fails immediately, naming the right flag**, when an explicit `--scale` is an order of
 magnitude off the data. `verify-schema` is scale-independent and is unaffected, and CI still passes
-`--scale 0.01` against its 0.01 seed (the detector confirms it). The genuine, non-scale failures are
-unchanged — see §3.2–§3.4.
+`--scale 0.01` against its 0.01 seed (the detector confirms it). The non-scale failures it left
+behind have since been re-measured and are gone — see §1.9.
 
-### 3.6 Oracle image — resolved: documented honestly
+### 3.3 Oracle image — resolved: documented honestly
 
 `.env.example` set `ORACLE_IMAGE=container-registry.oracle.com/database/free:latest`, but the schema
 was actually proven against **`gvenzl/oracle-free:23-slim`** (container `oracle-lab`), which is also
@@ -308,7 +321,7 @@ so it is the documented local default. The official image still works locally af
 `docker login container-registry.oracle.com`. Both are Oracle Free 23ai; the conversion itself has
 still never been run against either (§2.2).
 
-### 3.7 Unused `.env.example` variables — resolved
+### 3.4 Unused `.env.example` variables — resolved
 
 `AZ_TENANT_ID`, `VSCODE_EXTENSION_ID`, `VSCODE_MIN_VERSION`, `EXTENSION_MIN_VERSION`,
 `ORACLE_UTL_FILE_HOST_DIR` and `OUT_DIR` were read by no script, template or workflow.
@@ -318,7 +331,7 @@ host path is chosen by `install-oracle.sh` under the VM data mount, not by this 
 `OUT_DIR` are deleted. `VSCODE_EXTENSION_ID`, `VSCODE_MIN_VERSION` and `EXTENSION_MIN_VERSION` are
 kept but now carry a `REFERENCE ONLY` comment stating that no script reads them and what they pin.
 
-### 3.8 Conflicts inherited from Microsoft's own documentation
+### 3.5 Conflicts inherited from Microsoft's own documentation
 
 Two of these remain genuinely unresolved; the third — the model name — was settled by the
 2026-09-02 deployment and is marked so:
@@ -375,8 +388,8 @@ back into the repo. Redact both before pasting preflight output into an issue or
 | Read a large, realistic, deliberately hostile Oracle schema | **Yes.** This is the strongest part of the repo |
 | Build that schema locally in Docker and poke at it | **Yes.** Proven working, ~1,855 objects, 0 invalid |
 | Study 43 documented hard migration cases with predictions | **Yes**, as analysis. The predictions are untested |
-| Run the repo's static checks and CI | **Yes.** All 8 pass |
-| Run the repo's full Oracle test suite and see it green | **No.** 2 schema assertions and 2 data assertions fail — §3.2, §3.3, §3.4 |
+| Run the repo's static checks and CI | **Yes.** All 8 pass, and pass under CI's `--strict` (§1.1) |
+| Run the repo's full Oracle test suite and see it green | **Yes.** 10/10 checks, 41 schema and 64 count assertions green at `--scale 0.01` (§1.1, §1.9) |
 | Deploy the Azure environment from Bicep | **Yes.** Deployed for real and destroyed clean on 2026-09-02 (§1.6); the live resources were verified (§1.7) |
 | Seed Oracle on the Azure VM, or run `connect.sh` / `status.sh` live | **Unknown.** The VM booted; nothing was driven through it (§2.1) |
 | Run the AI conversion and compare against the predictions | **Unknown.** Never attempted |

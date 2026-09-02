@@ -184,7 +184,7 @@ Purpose tier.
 
 ### Foundry TPM: why 500,000
 
-The CONTOSO schema is roughly 1,820 objects, several of them 400-line package bodies. Each
+The CONTOSO schema is roughly 1,855 objects, several of them 400-line package bodies. Each
 convertible object is at least one model round trip, and flagged objects get several. At 500,000 TPM
 a full conversion
 run is throughput-bound on the tool, not on the model. Below about 100,000 TPM the run spends most
@@ -354,12 +354,32 @@ description of the thick-client component says "Windows and Linux only". Those t
 cannot both be complete. Apple Silicon sits exactly on the seam: it is ARM64, and ARM64 is
 explicitly unsupported on the two platforms where support is unambiguous.
 
-This lab therefore defaults to `CLIENT_PLATFORM=jumpbox`, which builds a Windows x64 VM inside the
-lab VNet and has you drive VS Code from there over Azure Bastion. It costs about nine dollars a day
-and removes an entire category of "is it me or is it the tool" debugging.
+This lab therefore builds a Windows x64 VM inside the lab VNet and has you drive VS Code from there
+over Azure Bastion. It costs about nine dollars a day and removes an entire category of "is it me or
+is it the tool" debugging.
 
-If you want to try your own machine first, set `CLIENT_PLATFORM=local`, skip the jumpbox, and save
-the money. You can always deploy the jumpbox later with a second `scripts/deploy.sh` run.
+**`CLIENT_PLATFORM` does not decide whether that VM gets built.** `scripts/deploy.sh` never reads
+the variable, and `infra/main.bicep` declares `module jumpbox` with no `= if (...)` condition — the
+jumpbox is deployed on every run. The only consumer is `scripts/preflight.sh`, which uses it to
+decide whether to reserve four Standard DSv5 vCPUs for the jumpbox in its quota check:
+
+```bash
+grep -c CLIENT_PLATFORM scripts/deploy.sh     # 0 - deploy.sh does not look at it
+grep -n CLIENT_PLATFORM scripts/preflight.sh  # the vCPU probe, and nothing else
+```
+
+So setting `CLIENT_PLATFORM=local` to save money does the opposite of what it looks like: you get
+the VM and its meter anyway, and you lose the quota probe that would otherwise have caught a
+`QuotaExceeded` *before* the deployment started. Leave it at `jumpbox` unless you have already
+confirmed your DSv5 quota by hand and specifically want that probe skipped.
+
+You are free to run VS Code on your own machine — nothing forces you onto the jumpbox, and section 9
+below applies to whichever machine you use. To stop the compute meter on a jumpbox you are not
+using, deallocate it after the deployment (its managed disk keeps billing):
+
+```bash
+az vm deallocate --ids "$(jq -r .jumpboxVmId generated/outputs.json)"
+```
 
 ---
 
@@ -519,7 +539,7 @@ Passwords worth thinking about for ten seconds:
 | Variable | Constraints |
 | --- | --- |
 | `ORACLE_SYSTEM_PASSWORD` | 12+ characters, at least one digit, no leading digit, and no `@` or `/` — SQL\*Plus easy-connect strings choke on both |
-| `CONTOSO_PASSWORD` | Same rules. This account owns all ~1,820 objects |
+| `CONTOSO_PASSWORD` | Same rules. This account owns all ~1,855 objects |
 | `ORACLE_MIGRATION_PASSWORD` | Same rules. This is what you type into the VS Code connection dialog |
 | `PGPASSWORD` | 8–128 characters, three of four character classes |
 | `JUMPBOX_ADMIN_PASSWORD` | 12–123 characters, Windows complexity rules |

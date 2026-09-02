@@ -149,8 +149,8 @@ then re-check `SELECT object_name FROM user_objects WHERE status='INVALID';`.
 **Fix:** expected on images where the SYSDBA grant is unavailable — losing one hard case beats refusing to seed. If you need VPD, grant `EXECUTE ON SYS.DBMS_RLS` to `CONTOSO` as SYS and re-run `--from 12-…`.
 
 **Symptom:** final object count is **short of the 1,000 floor** and `src/oracle/99-verify-objects.sql` fails.
-**Cause:** most often `--no-generate` was used, or the generator did not run, so the ~760 generated objects are absent; or invalid objects are not counted.
-**Fix:** run without `--no-generate` so `tools/generate-objects.py` fills `generated/`; recompile invalids (above). A correct build lands near **~1,820** objects (per-type design budget 1,110, hard floor 1,000) — landing at 1,001 means objects are missing, and it is a lab that fails on someone else's machine.
+**Cause:** most often `--no-generate` was used, or the generator did not run, so the ~792 generated objects are absent; or invalid objects are not counted.
+**Fix:** run without `--no-generate` so `tools/generate-objects.py` fills `generated/`; recompile invalids (above). A correct build lands near **~1,855** objects (per-type design budget 1,120, hard floor 1,000) — landing at 1,001 means objects are missing, and it is a lab that fails on someone else's machine.
 
 ---
 
@@ -178,7 +178,7 @@ The conversion is a feature of the **PostgreSQL extension for Visual Studio Code
 **Cause:** the required role name is unresolved upstream — current Foundry docs say **Foundry User**; DP-300 lab 18 says **Cognitive Services OpenAI User**.
 **Fix:** grant whichever your portal offers on the Foundry account, and check both (`FOUNDRY_RBAC_ROLE` / `FOUNDRY_RBAC_ROLE_FALLBACK`).
 
-**Symptom:** the tool throttles hard on the ~1,820-object schema.
+**Symptom:** the tool throttles hard on the ~1,855-object schema.
 **Cause:** model quota below the recommended 500,000 TPM.
 **Fix:** deploy the model with `foundryModelCapacity: 500` (GlobalStandard); confirm the region's quota headroom with `az cognitiveservices usage list -l <region>`.
 

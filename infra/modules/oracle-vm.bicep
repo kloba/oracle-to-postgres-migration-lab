@@ -20,7 +20,7 @@ param location string
 @description('Name of the Oracle virtual machine.')
 param vmName string
 
-@description('VM size. Standard_D4s_v5 is 4 vCPU / 16 GiB, which is enough for Oracle Database Free plus the ~1,820-object CONTOSO schema.')
+@description('VM size. Standard_D4s_v5 is 4 vCPU / 16 GiB, which is enough for Oracle Database Free plus the ~1,855-object CONTOSO schema.')
 param vmSize string = 'Standard_D4s_v5'
 
 @description('Resource ID of the subnet the VM NIC is placed in.')
