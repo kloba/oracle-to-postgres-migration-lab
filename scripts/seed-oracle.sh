@@ -761,8 +761,8 @@ COLUMN generated   FORMAT 999999
 COLUMN handwritten FORMAT 999999
 COLUMN total       FORMAT 999999
 SELECT object_type,
-       SUM(CASE WHEN LOWER(object_name) LIKE '%gen[_]%' ESCAPE '[' THEN 1 ELSE 0 END) AS generated,
-       SUM(CASE WHEN LOWER(object_name) LIKE '%gen[_]%' ESCAPE '[' THEN 0 ELSE 1 END) AS handwritten,
+       SUM(CASE WHEN LOWER(object_name) LIKE '%gen\_%' ESCAPE '\' THEN 1 ELSE 0 END) AS generated,
+       SUM(CASE WHEN LOWER(object_name) LIKE '%gen\_%' ESCAPE '\' THEN 0 ELSE 1 END) AS handwritten,
        COUNT(*) AS total
   FROM user_objects
  WHERE object_type NOT IN ('LOB','TABLE PARTITION','INDEX PARTITION','LOB PARTITION')

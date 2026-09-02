@@ -35,7 +35,7 @@ Everything in this section was run on a developer machine (macOS 14, Apple Silic
 | `bicep-build` | PASS | 8 templates compile under `az bicep build` |
 | `python-compile` | PASS | both generators compile |
 | `generator-determinism` | PASS | 13 files byte-identical across two different `PYTHONHASHSEED`s |
-| `markdown-links` | PASS | 99 relative links across 11 files, 0 broken |
+| `markdown-links` | PASS | 100 relative links across 12 files, 0 broken |
 | `secret-scan` | PASS | no real GUIDs, no tracked `.env` |
 
 ### 1.2 The Oracle schema genuinely builds, and is genuinely large
@@ -43,7 +43,7 @@ Everything in this section was run on a developer machine (macOS 14, Apple Silic
 The full seed was executed end to end against a local Oracle Free 23ai container and
 `tests/verify-schema.sql` was run against the result.
 
-- **1,823 objects** by the contract's counting rule
+- **1,855 objects** by the contract's counting rule
   (`user_objects` excluding `LOB`, `TABLE PARTITION`, `INDEX PARTITION`, `LOB PARTITION`).
 - **1,448 objects** if you also exclude `TABLE SUBPARTITION` and `INDEX SUBPARTITION`.
 - **The 1,000-object floor is met on either interpretation.** This is the binding requirement and it
@@ -240,7 +240,7 @@ been fixed and are marked **Resolved** inline (dated); the rest will still misle
 The README headline, the architecture diagram, `docs/design.md` and roughly **18 other places** used
 to call this a "1,110-object" schema, presenting the **per-type design budget** (the minimums in the
 README / `design.md` section 8 table, which sum to 1,110) as if it were the live object count. The
-measured count is **1,823** by the contract's counting rule (§1.2), of which **1,448** are
+measured count is **1,855** by the contract's counting rule (§1.2), of which **1,480** are
 non-partition objects; the remainder are subpartitions of composite-partitioned `inventory_movement`
 that drift with data volume. Actual per-type counts exceed nearly every design minimum (`INDEX`
 332 vs 78, `TABLE` 108 vs 64, `VIEW` 208 vs 198).
@@ -248,7 +248,7 @@ that drift with data volume. Actual per-type counts exceed nearly every design m
 **Resolved (2026-09-02):** the docs now use **~1,820** as the headline, add the ~1,450-non-partition /
 subpartition-drift note wherever the number is explained, keep **1,110** only where it is explicitly
 the design budget, and describe the 1,000 floor as comfortably cleared. `docs/02-seed-oracle.md`'s
-sample transcript now prints `TOTAL_OBJECTS=1823` and an abridged real census. The 1,000 floor
+sample transcript now prints `TOTAL_OBJECTS=1855` and an abridged real census. The 1,000 floor
 remains the only asserted figure (`src/oracle/99-verify-objects.sql`), which still reports 1,110 as
 its design target — correct, since that is the budget. Take the exact figure from your own seed run;
 it moves as the generated half is tuned and with data volume.
@@ -373,7 +373,7 @@ back into the repo. Redact both before pasting preflight output into an issue or
 | If you want to… | Can you, today? |
 | --- | --- |
 | Read a large, realistic, deliberately hostile Oracle schema | **Yes.** This is the strongest part of the repo |
-| Build that schema locally in Docker and poke at it | **Yes.** Proven working, ~1,823 objects, 0 invalid |
+| Build that schema locally in Docker and poke at it | **Yes.** Proven working, ~1,855 objects, 0 invalid |
 | Study 43 documented hard migration cases with predictions | **Yes**, as analysis. The predictions are untested |
 | Run the repo's static checks and CI | **Yes.** All 8 pass |
 | Run the repo's full Oracle test suite and see it green | **No.** 2 schema assertions and 2 data assertions fail — §3.2, §3.3, §3.4 |

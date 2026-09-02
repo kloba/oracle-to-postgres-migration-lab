@@ -106,4 +106,8 @@ param jumpboxAdminPassword = readEnvironmentVariable('JUMPBOX_ADMIN_PASSWORD', '
 
 // -- Bastion -----------------------------------------------------------------
 
-param bastionSkuName = readEnvironmentVariable('AZ_BASTION_SKU', 'Basic')
+// Standard, not Basic: Basic Bastion cannot do native-client tunneling, so
+// `az network bastion tunnel` fails and scripts/connect.sh plus
+// scripts/seed-oracle.sh --azure stop working. Set AZ_BASTION_SKU=Basic only if
+// you will use browser-based RDP and SSH exclusively.
+param bastionSkuName = readEnvironmentVariable('AZ_BASTION_SKU', 'Standard')

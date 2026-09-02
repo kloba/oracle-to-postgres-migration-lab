@@ -148,8 +148,8 @@ param jumpboxAdminPassword string
 
 // -- Bastion -----------------------------------------------------------------
 
-@description('Azure Bastion SKU. Basic is enough for browser-based RDP and SSH; Standard adds native client support.')
-param bastionSkuName string = 'Basic'
+@description('Azure Bastion SKU. Standard is the default because Basic cannot do native-client tunneling: "az network bastion tunnel" fails on Basic, and scripts/connect.sh and scripts/seed-oracle.sh --azure both depend on it. Basic is enough only if you will exclusively use browser-based RDP and SSH from the portal.')
+param bastionSkuName string = 'Standard'
 
 // -----------------------------------------------------------------------------
 // Names

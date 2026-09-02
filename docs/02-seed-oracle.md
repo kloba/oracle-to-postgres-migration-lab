@@ -303,7 +303,7 @@ and `--scale` as `&scale`. These are SQL\*Plus substitution variables, not gener
 
 == Verification ==
   ---- object count (the contract's counting rule) ----
-  TOTAL_OBJECTS=1823
+  TOTAL_OBJECTS=1855
 
   ---- by type (abridged; the seed also prints generated vs hand-written) ----
   OBJECT_TYPE                    TOTAL
@@ -339,7 +339,7 @@ and `--scale` as `&scale`. These are SQL\*Plus substitution variables, not gener
   files failed           0
   elapsed                48m 12s
   logs                   out/logs/seed-20260902-121544
-  objects in CONTOSO     1823 (floor 1000)
+  objects in CONTOSO     1855 (floor 1000)
 
 CONTOSO is loaded and verified.
 ```
