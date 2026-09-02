@@ -302,16 +302,24 @@ output resourceGroupName string = rg.name
 output location string = location
 
 @description('Private IPv4 address of the Oracle VM. This is ORACLE_HOST.')
-output oracleVmPrivateIp string = deployOracleVm ? oracleVm.outputs.privateIpAddress : oracleVmPrivateIp
+// These four are computed, never read back from the module. Every one of them
+// is deterministic from a parameter or variable: the NIC pins the private IP
+// statically from oracleVmPrivateIp, the VM name is oracleVmName, and the admin
+// user is the parameter. Referencing the module instead would mean a
+// reference() wrapped in an if() for the deployOracleVm=false path -- an
+// evaluation order ARM does not reliably short-circuit, on a path that only
+// runs when someone redeploys over an existing VM, i.e. exactly when it is
+// least tested. Deriving them removes that path entirely.
+output oracleVmPrivateIp string = oracleVmPrivateIp
 
 @description('Name of the Oracle VM.')
-output oracleVmName string = deployOracleVm ? oracleVm.outputs.vmName : oracleVmName
+output oracleVmName string = oracleVmName
 
 @description('Resource ID of the Oracle VM, for az network bastion tunnel --target-resource-id. scripts/connect.sh, scripts/seed-oracle.sh and tests/run-tests.sh all read this; without it they fall back to an extra az vm show round trip that breaks if the resource group or VM name has drifted.')
-output oracleVmId string = deployOracleVm ? oracleVm.outputs.vmId : resourceId(subscription().subscriptionId, resourceGroupName, 'Microsoft.Compute/virtualMachines', oracleVmName)
+output oracleVmId string = resourceId(subscription().subscriptionId, resourceGroupName, 'Microsoft.Compute/virtualMachines', oracleVmName)
 
 @description('SSH user name on the Oracle VM.')
-output oracleAdminUsername string = deployOracleVm ? oracleVm.outputs.adminUsername : oracleAdminUsername
+output oracleAdminUsername string = oracleAdminUsername
 
 @description('Fully qualified domain name of the PostgreSQL flexible server. Resolves only from inside the VNet. This is PGHOST.')
 output postgresFqdn string = postgres.outputs.fullyQualifiedDomainName
