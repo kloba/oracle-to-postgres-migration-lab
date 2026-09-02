@@ -390,7 +390,7 @@ loop's failure modes only appear in bulk. A thousand is also roughly where the r
 something you read end to end and starts being something you have to query — which is itself a
 finding about the workflow.
 
-**Why the split is ~350 hand-written and ~792 generated.** The hand-written core is a coherent
+**Why the split is 328 hand-written and 792 generated.** The hand-written core is a coherent
 retail domain: ten subject areas, 45 core tables, four separate hierarchies, real business logic in
 25 packages. It has to be believable, because a converter facing plausible code behaves differently
 from one facing obvious test fixtures. The generated bulk provides scale without asking anyone to

@@ -1,6 +1,6 @@
 # 02 — Seed the Oracle source
 
-Build the `CONTOSO` schema: about 350 hand-written objects, 792 budgeted generated ones, and up to a
+Build the `CONTOSO` schema: 328 hand-written objects, 792 budgeted generated ones, and up to a
 couple of million rows of retail data. One command does all of it and then proves it worked.
 
 - [What "seeding" means here](#what-seeding-means-here)

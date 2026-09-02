@@ -22,13 +22,17 @@
 --         * inventory_location has exactly one parent
 --
 -- SCALE
---   Row minimums scale with &scale, the same multiplier scripts/seed-oracle.sh
---   takes. The three named levels:
+--   Row volume does NOT vary continuously with &scale. tools/generate-data.py
+--   has exactly three tiers and scripts/seed-oracle.sh snaps the number onto
+--   one of them, so the floors are scaled by the TIER FACTOR, not by the raw
+--   number. Getting this wrong broke the default: --scale 1 is the medium tier
+--   (~96,000 orders) but a raw-&scale floor demanded 195,000 and failed a
+--   perfectly good seed.
 --
---       level    --scale   orders     customers   typical use
---       small       0.01      2,500         500   CI smoke test
---       medium      0.1      25,000       5,000   laptop development
---       full        1       250,000      50,000   the real lab
+--       --scale        tier     factor   orders    typical use
+--       0 .. 0.1       small       x1     2,406    CI smoke test
+--       0.5 .. 1.x     medium     x40    96,006    the default
+--       2+             large     x200   480,006    the full lab
 --
 --   The minimums below are FLOORS: a seeder that rounds down, samples, or skews
 --   a distribution slightly must not fail the build; a seeder that silently
@@ -78,6 +82,8 @@ DECLARE
    -- block before it starts.
    v_scale_txt   VARCHAR2(40) := NVL(TRIM('&scale'), '1');
    v_scale       NUMBER;
+   v_factor      PLS_INTEGER;   -- generator tier factor: 1, 40 or 200
+   v_eff_scale   NUMBER;        -- v_factor/100, the scale the floors are calibrated in
    -- TO_CHAR(0.01) renders as '.01' and TO_CHAR with a decimal mask leaves
    -- a trailing '.' on whole numbers. Neither reads well in a report.
    v_scale_disp  VARCHAR2(40);
@@ -206,16 +212,40 @@ BEGIN
 
    v_scale_disp := RTRIM(TO_CHAR(v_scale, 'FM99990.999999'), '.');
 
-   v_level := CASE
-                 WHEN v_scale <= 0.02 THEN 'small'
-                 WHEN v_scale <= 0.2  THEN 'medium'
-                 WHEN v_scale <  1    THEN 'partial'
-                 ELSE                      'full'
+   -- Row volume does NOT vary continuously with &scale. tools/generate-data.py
+   -- only has three tiers, and scripts/seed-oracle.sh snaps the number onto one
+   -- of them before calling it:
+   --
+   --     --scale 0 .. 0.1   -> small   (factor   1)
+   --     --scale 0.5 .. 1.x -> medium  (factor  40)
+   --     --scale 2+         -> large   (factor 200)
+   --
+   -- Multiplying the floors by the raw &scale therefore asks for the wrong
+   -- number everywhere the two disagree, and they disagree badly at the
+   -- DEFAULT. `seed-oracle.sh --local` with no --scale is scale 1, which is the
+   -- medium tier: ~96,000 orders emitted, but a raw-&scale floor demands
+   -- 195,000 and the check fails on a perfectly good seed.
+   --
+   -- So derive the tier the way seed-oracle.sh does, and express it as the
+   -- equivalent scale the floors were calibrated in (small = 0.01), which keeps
+   -- every want() number below unchanged and correct at all three tiers.
+   v_factor := CASE
+                  WHEN v_scale <= 0.1 THEN 1      -- small
+                  WHEN v_scale <  2   THEN 40     -- medium
+                  ELSE                     200    -- large
+               END;
+   v_eff_scale := v_factor / 100;
+
+   v_level := CASE v_factor
+                 WHEN 1   THEN 'small'
+                 WHEN 40  THEN 'medium'
+                 ELSE          'large'
               END;
 
    p(' ');
    p('schema          : ' || SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'));
-   p('scale           : ' || v_scale_disp || '   (level: ' || v_level || ')');
+   p('scale           : ' || v_scale_disp || '   (tier: ' || v_level
+     || ', generator factor x' || v_factor || ')');
    p('checked at      : ' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD HH24:MI:SS TZR'));
 
    -- ==================================================================
@@ -299,7 +329,7 @@ BEGIN
 
    FOR i IN 1 .. v_n LOOP
       v_rows := row_count(v_tab(i));
-      v_min  := v_fixed(i) + CEIL(v_scaled(i) * v_scale);
+      v_min  := v_fixed(i) + CEIL(v_scaled(i) * v_eff_scale);
 
       IF v_rows < 0 THEN
          p('    ' || RPAD(v_tab(i), 26) || LPAD('-', 12) || LPAD(v_min, 12)
