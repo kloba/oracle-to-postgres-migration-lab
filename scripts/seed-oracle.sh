@@ -205,7 +205,11 @@ CONTOSO_PW="$(kv_or_env CONTOSO_PASSWORD         KV_SECRET_CONTOSO_PASSWORD)"
 READER_PW="$(kv_or_env ORACLE_MIGRATION_PASSWORD KV_SECRET_ORACLE_MIGRATION_PASSWORD)"
 
 [[ -n "$SYSTEM_PW"  ]] || die "ORACLE_SYSTEM_PASSWORD is not set"  "set it in ${ENV_FILE} (or USE_KEYVAULT=1)"
-[[ -n "$CONTOSO_PW" ]] || die "CONTOSO_PASSWORD is not set"        "set it in ${ENV_FILE} (or USE_KEYVAULT=1)"
+# CONTOSO_PW becomes &contoso_password / &1 in 00-user-tablespace.sql's
+# CREATE USER contoso IDENTIFIED BY "...". An empty value makes that a
+# zero-length identifier -- ORA-01741 -- raised deep inside the SQL on a clean
+# runner. Catch it here, by name, before a single line of SQL is fed to sqlplus.
+[[ -n "$CONTOSO_PW" ]] || die "CONTOSO_PASSWORD is empty"          "set it in ${ENV_FILE} (or USE_KEYVAULT=1); 00-user-tablespace.sql needs it to CREATE USER contoso"
 
 # --------------------------------------------------------------------------
 # Locate the SQL. src/oracle/ is where the hand-written schema lives; sql/ is
@@ -578,11 +582,21 @@ DEFINE customer_rows = "${SEED_CUSTOMER_ROWS:-50000}"
 PRE
     # The SYSTEM credentials are only handed to the file that has to create the
     # CONTOSO user. Everything else runs as CONTOSO and never sees them.
+    #
+    # DEFINE 1 supplies the first positional SQL*Plus parameter that
+    # src/oracle/00-user-tablespace.sql expects: its line 25 does
+    # `DEFINE contoso_password = '&1'`. That contract is written for a standalone
+    # `sqlplus @00-user-tablespace.sql "$pw"` run. We feed files on stdin, not
+    # with @, so there is no positional &1 -- sqlplus would prompt for it, read an
+    # empty line, and CREATE USER with a zero-length password (ORA-01741, seen on
+    # a clean CI runner). Emitting &1 as a DEFINE here closes that gap and leaves
+    # the .sql file and its documented positional-arg contract untouched.
     if [[ "$as_system" == "1" ]]; then
         cat <<PRE
 DEFINE system_user = "${ORACLE_SYSTEM_USER}"
 DEFINE system_password = "${SYSTEM_PW}"
 DEFINE cdb_service = "${ORACLE_CDB_SERVICE:-FREE}"
+DEFINE 1 = "${CONTOSO_PW}"
 PRE
     fi
 }

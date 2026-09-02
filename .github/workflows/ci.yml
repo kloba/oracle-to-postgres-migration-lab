@@ -63,10 +63,15 @@ jobs:
 
       - name: Install shellcheck
         run: |
-          # ubuntu-latest ships shellcheck, but the version moves with the
-          # image and new releases add findings. Install a pinned one so a
-          # green build stays green until someone changes this line.
-          SC_VERSION=v0.10.0
+          # Pin shellcheck to an exact version. ubuntu-latest ships its own, but
+          # the version moves with the runner image and each release can add new
+          # findings (e.g. SC2329 arrived in 0.11.0), so an UNPINNED lint turns a
+          # green build red with no code change at all. v0.11.0 is pinned because
+          # it is the version the scripts are validated against and the one
+          # contributors run locally, so CI and a laptop agree. Bumping this line
+          # is a deliberate act: run `tests/run-tests.sh --strict` against the new
+          # release first and clear whatever findings it introduces.
+          SC_VERSION=v0.11.0
           curl -fsSL --retry 3 \
             "https://github.com/koalaman/shellcheck/releases/download/${SC_VERSION}/shellcheck-${SC_VERSION}.linux.x86_64.tar.xz" \
             | tar -xJf - -C /tmp
