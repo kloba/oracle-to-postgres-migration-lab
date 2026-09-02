@@ -1,0 +1,320 @@
+# ---------------------------------------------------------------------------
+# oracle-smoke.yml - the real integration test.
+#
+# Stands up Oracle Database Free 23ai as a service container, generates the
+# bulk objects, loads the whole CONTOSO schema at the smallest scale, and runs
+# tests/verify-schema.sql against it. This is the workflow that proves the
+# schema actually compiles, not just that the files parse.
+#
+# NO SECRETS REQUIRED. The Oracle password is a throwaway for a container that
+# exists for the length of one job, is reachable only from that runner, and is
+# destroyed with it. It guards nothing. A fork can override it by setting the
+# ORACLE_CI_PASSWORD repository variable (Settings > Secrets and variables >
+# Actions > Variables); nothing breaks if you do not.
+#
+# TIMING. Oracle Free takes several minutes to open the PDB on a GitHub
+# runner. The job therefore waits on the container's own healthcheck script
+# rather than sleeping a fixed time, and carries a generous timeout. A fixed
+# sleep is the classic way this test becomes flaky.
+#
+# VERSION NOTE. docs/design.md section 11.5: Microsoft documents 12.1, 12.2,
+# 18c, 19c and 21c as supported conversion sources. 23ai is NOT on that list,
+# and this workflow uses it anyway because it is the only Oracle that starts
+# in minutes in a container. That is a deliberate, documented trade: this
+# workflow proves the schema is valid Oracle, not that the conversion tool
+# supports the version.
+#
+# See docs/design.md sections 8 and 12, and CONTRIBUTING.md.
+# ---------------------------------------------------------------------------
+name: oracle-smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/oracle/**'
+      - 'sql/**'
+      - 'seed/**'
+      - 'tools/**'
+      - 'tests/**'
+      - 'scripts/seed-oracle.sh'
+      - '.github/workflows/oracle-smoke.yml'
+  pull_request:
+    paths:
+      - 'src/oracle/**'
+      - 'sql/**'
+      - 'seed/**'
+      - 'tools/**'
+      - 'tests/**'
+      - 'scripts/seed-oracle.sh'
+      - '.github/workflows/oracle-smoke.yml'
+  schedule:
+    # 04:17 UTC daily. An odd minute on purpose: every scheduled workflow on
+    # GitHub that asks for 04:00 fires at the same instant and queues.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: 'Row-volume scale (0.01 = smoke, 1 = full lab)'
+        required: false
+        default: '0.01'
+
+concurrency:
+  group: oracle-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  smoke:
+    name: seed and verify CONTOSO
+    runs-on: ubuntu-latest
+    # Oracle startup dominates. 90 minutes is deliberately generous: a
+    # timeout that fires during a slow image pull teaches nobody anything.
+    timeout-minutes: 90
+
+    env:
+      # The throwaway credential, in one place. Overridable by repo variable.
+      ORACLE_CI_PASSWORD: ${{ vars.ORACLE_CI_PASSWORD || 'Ci_Contoso_Throwaway_2026' }}
+      SMOKE_SCALE: ${{ github.event.inputs.scale || '0.01' }}
+      NO_COLOR: '1'
+
+    services:
+      oracle:
+        image: gvenzl/oracle-free:23-slim
+        env:
+          # Sets the SYS and SYSTEM password inside the container.
+          ORACLE_PASSWORD: ${{ vars.ORACLE_CI_PASSWORD || 'Ci_Contoso_Throwaway_2026' }}
+        ports:
+          - 1521:1521
+        # The image ships /opt/oracle/healthcheck.sh on PATH but declares no
+        # HEALTHCHECK, so we supply one. GitHub will not start the job's steps
+        # until this reports healthy, which is the wait we want -- no sleeps.
+        #   start-period 180s  Oracle is still creating the PDB; failures
+        #                      during this window do not count against retries
+        #   interval 20s x 60  up to 20 further minutes to become healthy
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 20s
+          --health-timeout 10s
+          --health-retries 60
+          --health-start-period 180s
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # -------------------------------------------------------------------
+      # scripts/seed-oracle.sh --local drives sqlplus with `docker exec`,
+      # which needs the container's name. GitHub generates that name, so it
+      # has to be discovered rather than assumed.
+      # -------------------------------------------------------------------
+      - name: Find the Oracle service container
+        id: oracle
+        run: |
+          set -euo pipefail
+          NAME="$(docker ps --filter "ancestor=gvenzl/oracle-free:23-slim" \
+                            --format '{{.Names}}' | head -1)"
+          if [[ -z "$NAME" ]]; then
+            echo "::error::no running gvenzl/oracle-free container found"
+            docker ps -a
+            exit 1
+          fi
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "Oracle service container: ${NAME}"
+          echo "health: $(docker inspect --format '{{.State.Health.Status}}' "$NAME")"
+
+      # -------------------------------------------------------------------
+      # Belt and braces. GitHub already blocks until the service is healthy,
+      # but that guarantee is worth re-asserting explicitly: if the health
+      # command is ever wrong, this loop fails with a readable message and
+      # the container's own log instead of a confusing ORA- error 40 minutes
+      # later. Still a healthcheck poll -- still not a fixed sleep.
+      # -------------------------------------------------------------------
+      - name: Wait for FREEPDB1 to accept connections
+        env:
+          CONTAINER: ${{ steps.oracle.outputs.name }}
+        run: |
+          set -euo pipefail
+          DEADLINE=$(( SECONDS + 1500 ))
+          until [[ "$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER")" == "healthy" ]]; do
+            if [[ "$SECONDS" -ge "$DEADLINE" ]]; then
+              echo "::error::Oracle did not become healthy within 25 minutes"
+              docker logs --tail 100 "$CONTAINER"
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "Container reports healthy after ${SECONDS}s."
+
+          # Healthy is not the same as "the PDB is open and accepts a login".
+          # Prove the actual thing the seed script is about to do.
+          #
+          # sqlplus is started with /nolog and the CONNECT is fed on stdin, so
+          # the password never reaches argv and never shows up in `ps` on the
+          # runner. docs/design.md section 2 requires this and
+          # scripts/seed-oracle.sh does the same.
+          for attempt in $(seq 1 30); do
+            if printf '%s\n' \
+                 "SET HEADING OFF FEEDBACK OFF" \
+                 "CONNECT system/\"${ORACLE_CI_PASSWORD}\"@localhost:1521/FREEPDB1" \
+                 "SELECT 'LOGIN_OK' FROM dual;" \
+                 "EXIT SUCCESS" \
+               | docker exec -i "$CONTAINER" sqlplus -S -L /nolog \
+               | tee /tmp/login.txt | grep -q 'LOGIN_OK'; then
+              echo "FREEPDB1 accepted a SYSTEM login on attempt ${attempt}."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::FREEPDB1 never accepted a SYSTEM login"
+          cat /tmp/login.txt || true
+          docker logs --tail 100 "$CONTAINER"
+          exit 1
+
+      # -------------------------------------------------------------------
+      # .env is gitignored and never committed. Build one for this job from
+      # .env.example, then append the CI overrides. Later assignments win
+      # when bash sources the file, so appending is enough and no fragile
+      # in-place editing is needed.
+      # -------------------------------------------------------------------
+      - name: Write a throwaway .env
+        env:
+          CONTAINER: ${{ steps.oracle.outputs.name }}
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          cat >> .env <<EOF
+
+          # ---- appended by .github/workflows/oracle-smoke.yml ----
+          ORACLE_CONTAINER_NAME=${CONTAINER}
+          ORACLE_HOST=localhost
+          ORACLE_PORT=1521
+          ORACLE_SERVICE=FREEPDB1
+          ORACLE_CDB_SERVICE=FREE
+          ORACLE_SYSTEM_USER=SYSTEM
+          ORACLE_SYSTEM_PASSWORD=${ORACLE_CI_PASSWORD}
+          CONTOSO_SCHEMA=CONTOSO
+          CONTOSO_PASSWORD=${ORACLE_CI_PASSWORD}
+          ORACLE_MIGRATION_PASSWORD=${ORACLE_CI_PASSWORD}
+          USE_KEYVAULT=0
+          SEED_ORDER_ROWS=250000
+          SEED_CUSTOMER_ROWS=50000
+          EOF
+          chmod 600 .env
+          # Show the shape without the values.
+          echo "wrote .env with $(grep -c '=' .env) assignments"
+
+      # -------------------------------------------------------------------
+      # Generate the ~760 bulk objects. scripts/seed-oracle.sh would do this
+      # itself, but running it as its own step means a generator failure is
+      # reported as a generator failure rather than as a seeding failure.
+      # -------------------------------------------------------------------
+      - name: Generate the bulk objects
+        env:
+          GEN_SEED: '20260902'
+        run: |
+          set -euo pipefail
+          mkdir -p generated
+          for GEN in tools/generate-objects.py tools/generate-data.py; do
+            [[ -f "$GEN" ]] || { echo "skipping ${GEN} (not present)"; continue; }
+
+            HELP="$(python3 "$GEN" --help 2>&1 || true)"
+            if [[ -z "${HELP//[[:space:]]/}" ]]; then
+              echo "::warning::${GEN} exposes no command line yet; skipping"
+              continue
+            fi
+
+            ARGS=()
+            grep -qe '--seed'  <<<"$HELP" && ARGS+=(--seed "$GEN_SEED")
+            grep -qe '--scale' <<<"$HELP" && ARGS+=(--scale "$SMOKE_SCALE")
+            if   grep -qe '--out\b'      <<<"$HELP"; then ARGS+=(--out generated)
+            elif grep -qe '--output-dir' <<<"$HELP"; then ARGS+=(--output-dir generated)
+            fi
+
+            echo "--- python3 ${GEN} ${ARGS[*]-}"
+            python3 "$GEN" ${ARGS[@]+"${ARGS[@]}"}
+          done
+          echo "generated/ now holds $(find generated -name '*.sql' | wc -l) .sql file(s)"
+
+      # -------------------------------------------------------------------
+      # The load itself.
+      # -------------------------------------------------------------------
+      - name: Seed CONTOSO
+        run: |
+          set -euo pipefail
+          chmod +x scripts/seed-oracle.sh
+          scripts/seed-oracle.sh --local --scale "$SMOKE_SCALE" --no-generate
+
+      # -------------------------------------------------------------------
+      # The assertion this whole workflow exists for.
+      # -------------------------------------------------------------------
+      - name: Verify the schema
+        run: |
+          set -euo pipefail
+          chmod +x tests/run-tests.sh
+          tests/run-tests.sh --local --scale "$SMOKE_SCALE" --only 'verify-schema'
+
+      # verify-counts.sql depends on the seed/ row layer, which is loaded by
+      # the same script. Reported separately so "the schema is wrong" and
+      # "the data is wrong" are never the same red X.
+      - name: Verify the row counts
+        run: |
+          set -euo pipefail
+          tests/run-tests.sh --local --scale "$SMOKE_SCALE" --only 'verify-counts'
+
+      # -------------------------------------------------------------------
+      # Diagnostics. Always, because a failed run is when they are wanted.
+      # -------------------------------------------------------------------
+      - name: Object census
+        if: always()
+        env:
+          CONTAINER: ${{ steps.oracle.outputs.name }}
+        run: |
+          set -uo pipefail
+          {
+            echo "## CONTOSO object census"
+            echo
+            echo '```'
+            printf '%s\n' \
+              "SET HEADING ON FEEDBACK OFF LINESIZE 120 PAGESIZE 200" \
+              "CONNECT CONTOSO/\"${ORACLE_CI_PASSWORD}\"@localhost:1521/FREEPDB1" \
+              "COLUMN object_type FORMAT A24" \
+              "SELECT object_type, COUNT(*) AS n FROM user_objects" \
+              " WHERE object_type NOT IN ('LOB','TABLE PARTITION','INDEX PARTITION','LOB PARTITION')" \
+              " GROUP BY object_type ORDER BY n DESC;" \
+              "SELECT COUNT(*) AS total_objects FROM user_objects" \
+              " WHERE object_type NOT IN ('LOB','TABLE PARTITION','INDEX PARTITION','LOB PARTITION');" \
+              "SELECT COUNT(*) AS invalid_objects FROM user_objects WHERE status = 'INVALID';" \
+              "EXIT SUCCESS" \
+            | docker exec -i "$CONTAINER" sqlplus -S -L /nolog \
+            || echo "(could not connect as CONTOSO)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Oracle container log
+        if: failure()
+        env:
+          CONTAINER: ${{ steps.oracle.outputs.name }}
+        run: docker logs --tail 200 "$CONTAINER" || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-smoke-logs
+          path: |
+            out/logs/
+            generated/*.sql
+          retention-days: 7
+          if-no-files-found: ignore

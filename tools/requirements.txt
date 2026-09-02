@@ -1,0 +1,56 @@
+# ===========================================================================
+# Contoso Store  -  Oracle to Azure Database for PostgreSQL migration lab
+# tools/requirements.txt
+# ---------------------------------------------------------------------------
+# THERE ARE NO DEPENDENCIES. DO NOT RUN pip install.
+#
+# tools/generate-objects.py and tools/generate-data.py use the Python 3.9+
+# standard library ONLY. This is deliberate and is a contract, not an
+# accident:
+#
+#   1. Both generators must be byte-for-byte deterministic across machines.
+#      A third-party library that changes its float formatting, its dict
+#      ordering, its hashing or its Faker locale data between minor releases
+#      silently breaks cross-run diffs of the conversion report, which is the
+#      entire point of the lab (docs/design.md sections 7 and 12).
+#
+#   2. The generators run on the Windows x64 jumpbox (CLIENT_PLATFORM=jumpbox)
+#      and inside CI, neither of which is guaranteed outbound egress to PyPI.
+#      Egress is budgeted for the Foundry endpoint, the VS Code Marketplace,
+#      GitHub Copilot and github.com/microsoft/pgsql-tools/ - nothing else.
+#
+#   3. A public lab repo that asks the reader to pip install from an
+#      unpinned requirements file is teaching the wrong lesson.
+#
+# If you are tempted to add a dependency here, add a stdlib helper to the
+# generator instead, or raise it in docs/design.md first - that file wins.
+#
+# Verify the toolchain instead of installing one:
+#
+#   python3 --version                  # must be 3.9 or later
+#   python3 -m py_compile tools/generate-objects.py tools/generate-data.py
+#   python3 tools/generate-objects.py --help
+#   python3 tools/generate-data.py --help
+#
+# Modules used, all standard library:
+#
+#   tools/generate-objects.py
+#     argparse, collections, dataclasses, hashlib, os, pathlib, random, sys,
+#     typing
+#
+#   tools/generate-data.py
+#     argparse, collections, os, pathlib, sys, typing
+#
+# Note what is NOT in those lists. There is no `random` in the data generator
+# and no `datetime` in either: row values are computed inside the emitted
+# PL/SQL by a small integer LCG and by Oracle DATE arithmetic, so the data is
+# deterministic on the ORACLE side as well as in the generated file. A Python
+# RNG would only make the file reproducible, not the load.
+#
+# Determinism rules both scripts follow, and that any change must keep:
+#   - seed every random source; never call the module-level random functions
+#   - never iterate a set, and never call hash() (PYTHONHASHSEED varies)
+#   - write files with an explicit encoding="utf-8" and newline="\n"
+#   - derive per-object randomness from sha256(seed, family, ordinal) so output
+#     does not depend on emission order
+# ===========================================================================

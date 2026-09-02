@@ -1,0 +1,1509 @@
+#cloud-config
+# ---------------------------------------------------------------------------
+# oracle-vm.yaml - first-boot provisioning for the lab's "on-premises" Oracle
+# server.
+#
+# infra/modules/oracle-vm.bicep hands this document to the VM as customData,
+# base64 encoded. scripts/deploy.sh renders it first, replacing the
+# double-underscore placeholders below with values from .env or from Key Vault.
+#
+# WHAT COMES OUT OF IT
+#   Ubuntu 22.04 -> Docker CE -> a 128 GiB ext4 volume at /u01 -> Oracle
+#   Database Free in a container with its datafiles on that volume -> the
+#   sessions parameter raised above 10 -> the CONTOSO schema owner and the
+#   conversion tool's read-only account -> /var/log/contoso-oracle-ready.
+#
+# HOW TO TELL WHEN IT IS DONE
+#   The marker file is the contract. Poll it, do not guess:
+#
+#     until ssh azureuser@10.42.1.10 test -f /var/log/contoso-oracle-ready
+#     do sleep 30; done
+#
+#   A run that fails leaves /var/log/contoso-oracle-failed instead, so a poller
+#   can give up instead of waiting an hour for something that is never coming.
+#   The full transcript is /var/log/contoso-oracle-setup.log.
+#
+#   First boot takes 20-35 minutes: roughly 9 GB of image to pull, then Oracle
+#   creating the database from scratch on an empty volume.
+#
+# WHY THE WORK IS IN AN EMBEDDED SCRIPT RATHER THAN IN cloud-init MODULES
+#   cloud-init has disk_setup, fs_setup and mounts modules that could do the
+#   /u01 volume, and a runcmd could do the rest. But cloud-init runs exactly
+#   once, and the interesting failures here (a slow registry, a disk that has
+#   not appeared yet, a database that will not open) all want a human to be
+#   able to re-run the provisioning by hand afterwards.
+#
+#   So the whole build is one idempotent script, written to
+#   /usr/local/sbin/install-oracle.sh and executed from runcmd. The copy below
+#   is byte-identical to scripts/install-oracle.sh in the repo. Repairing the
+#   box over SSH is then:
+#
+#     sudo /usr/local/sbin/install-oracle.sh
+#
+# SECRETS
+#   No password is hardcoded in this file. deploy.sh templates them into
+#   /etc/contoso-oracle.env, which is written mode 0600, root-owned.
+#
+#   Be aware of what that means: customData is readable by root on the VM at
+#   /var/lib/cloud/instance/user-data.txt and via the Azure instance metadata
+#   service. That is inherent to passing anything through customData, and it is
+#   why the better path for a non-throwaway environment is USE_KEYVAULT=1 with
+#   the passwords left empty here - the VM has a system-assigned identity for
+#   exactly this, and install-oracle.sh will fetch them over IMDS instead.
+#
+# Part of the Contoso Store Oracle -> Azure Database for PostgreSQL lab.
+# ---------------------------------------------------------------------------
+
+package_update: true
+package_upgrade: false
+
+# The script installs these itself as well, so it works on a box that never saw
+# cloud-init. Having them up front just means the first apt run is the only one.
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - jq
+  - e2fsprogs
+  - util-linux
+
+write_files:
+
+  # -------------------------------------------------------------------------
+  # Configuration for install-oracle.sh.
+  #
+  # Every value is single-quoted so that sourcing this file cannot execute
+  # anything hiding in a password. install-oracle.sh additionally refuses any
+  # password containing a quote, a space, '@', '/' or a backslash.
+  #
+  # The double-underscore placeholders are rendered by scripts/deploy.sh. If
+  # this document is deployed WITHOUT going through deploy.sh, they survive, so
+  # each non-secret falls back to the documented default just below it. The
+  # passwords deliberately have no fallback: install-oracle.sh hard-fails on a
+  # password that still looks like a placeholder, because the alternative is a
+  # database whose SYSTEM password is the name of a variable.
+  #
+  # deploy.sh also renders an SSH public key placeholder. It is intentionally
+  # not used here: the Bicep osProfile already installs the admin key, and
+  # doing it twice risks writing a bare placeholder into authorized_keys.
+  # -------------------------------------------------------------------------
+  - path: /etc/contoso-oracle.env
+    owner: root:root
+    permissions: '0600'
+    content: |
+      # Written by cloud-init. Mode 0600 - it holds passwords.
+      # Edit and re-run: sudo /usr/local/sbin/install-oracle.sh
+
+      ORACLE_SYSTEM_PASSWORD='__ORACLE_SYSTEM_PASSWORD__'
+      CONTOSO_PASSWORD='__CONTOSO_PASSWORD__'
+      ORACLE_MIGRATION_PASSWORD='__ORACLE_MIGRATION_PASSWORD__'
+
+      ORACLE_IMAGE='__ORACLE_IMAGE__'
+      ORACLE_CONTAINER_NAME='__ORACLE_CONTAINER_NAME__'
+      ORACLE_SERVICE='__ORACLE_SERVICE__'
+      ORACLE_PORT='__ORACLE_PORT__'
+      CONTOSO_SCHEMA='__CONTOSO_SCHEMA__'
+      ORACLE_MIGRATION_USER='__ORACLE_MIGRATION_USER__'
+
+      # Fallbacks for a deployment that never ran deploy.sh. A placeholder that
+      # was never rendered still contains '__', which is not legal in any of
+      # these values anyway.
+      case "$ORACLE_IMAGE"           in *__*) ORACLE_IMAGE='container-registry.oracle.com/database/free:latest' ;; esac
+      case "$ORACLE_CONTAINER_NAME"  in *__*) ORACLE_CONTAINER_NAME='contoso-oracle' ;; esac
+      case "$ORACLE_SERVICE"         in *__*) ORACLE_SERVICE='FREEPDB1' ;; esac
+      case "$ORACLE_PORT"            in *__*) ORACLE_PORT='1521' ;; esac
+      case "$CONTOSO_SCHEMA"         in *__*) CONTOSO_SCHEMA='CONTOSO' ;; esac
+      case "$ORACLE_MIGRATION_USER"  in *__*) ORACLE_MIGRATION_USER='O2P_READER' ;; esac
+      # An un-templated reader password means "do not create the reader", which
+      # is a warning rather than a failure.
+      case "$ORACLE_MIGRATION_PASSWORD" in *__*) ORACLE_MIGRATION_PASSWORD='' ;; esac
+
+      # Not templated by deploy.sh - plain configuration, tune in place.
+      ORACLE_CDB_SERVICE='FREE'
+      ORACLE_MIN_SESSIONS='50'
+      ORACLE_PROCESSES='200'
+      ORACLE_DATA_MOUNT='/u01'
+      CONTOSO_TABLESPACE='CONTOSO_DATA'
+      CONTOSO_TABLESPACE_MAXSIZE='8G'
+      ORACLE_UTL_FILE_DIR_NAME='CONTOSO_EXPORT_DIR'
+      ORACLE_RESTART_POLICY='unless-stopped'
+      ORACLE_READY_TIMEOUT='3600'
+      ORACLE_POLL_INTERVAL='15'
+
+      # Preferred for anything that is not a throwaway lab: leave the three
+      # passwords above empty, set these, and give the VM's system-assigned
+      # identity the 'Key Vault Secrets User' role on the vault.
+      USE_KEYVAULT='0'
+      AZ_KEYVAULT_NAME=''
+      KV_SECRET_ORACLE_SYSTEM_PASSWORD='oracle-system-password'
+      KV_SECRET_CONTOSO_PASSWORD='contoso-schema-password'
+      KV_SECRET_ORACLE_MIGRATION_PASSWORD='oracle-reader-password'
+
+  # -------------------------------------------------------------------------
+  # The provisioner. Byte-identical to scripts/install-oracle.sh in the repo -
+  # if you change one, regenerate the other.
+  # -------------------------------------------------------------------------
+  - path: /usr/local/sbin/install-oracle.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # ---------------------------------------------------------------------------
+      # install-oracle.sh - build, or repair, the lab's "on-premises" Oracle server.
+      #
+      # This is the same logic scripts/cloud-init/oracle-vm.yaml runs at first boot.
+      # The cloud-init document embeds a byte-identical copy of this file at
+      # /usr/local/sbin/install-oracle.sh, so when something goes wrong you SSH in and
+      # re-run it rather than redeploying the VM:
+      #
+      #     ssh azureuser@10.42.1.10
+      #     sudo /usr/local/sbin/install-oracle.sh          # repair in place
+      #     sudo /usr/local/sbin/install-oracle.sh --help   # what else it can do
+      #
+      # What it does, in order:
+      #   1.  Install Docker CE from Docker's own apt repository (not the distro's
+      #       docker.io package).
+      #   2.  Find the Azure data disk, make an ext4 filesystem on it exactly once,
+      #       and mount it at /u01 with an fstab entry keyed by UUID.
+      #   3.  Point the Docker data-root at /u01 so the ~9 GB Oracle image does not
+      #       fill the OS disk, and cap the container log.
+      #   4.  Pull container-registry.oracle.com/database/free.
+      #   5.  Run it as a container with the datafiles bind-mounted from /u01, so the
+      #       container is disposable and the database is not.
+      #   6.  Poll until the instance is genuinely OPEN and FREEPDB1 is READ WRITE.
+      #       No "sleep 600 and hope".
+      #   7.  Raise the "sessions" parameter above 10 - the conversion tool's parallel
+      #       metadata reads need it - and restart the instance, because "sessions" is
+      #       static.
+      #   8.  Create the CONTOSO schema owner with the privileges the ~1,820 hand
+      #       written and generated objects need, and a quota big enough for the seed;
+      #       create the low-privilege reader the conversion tool logs in as.
+      #   9.  Write /var/log/contoso-oracle-ready so other scripts can poll for it.
+      #
+      # EVERY STEP IS IDEMPOTENT. Re-running this script on a working box changes
+      # nothing and exits 0. It will never reformat a disk that already has a
+      # filesystem, never drop a schema, and never delete a datafile.
+      #
+      # NO PASSWORD IS HARDCODED HERE. They come from the environment, from an env
+      # file (default /etc/contoso-oracle.env, mode 0600), or from Key Vault via the
+      # VM's managed identity. Missing ones are a loud, specific failure.
+      #
+      # Everything is logged to /var/log/contoso-oracle-setup.log.
+      #
+      # Part of the Contoso Store Oracle -> Azure Database for PostgreSQL lab.
+      # ---------------------------------------------------------------------------
+      set -euo pipefail
+
+      SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+      SCRIPT_VERSION="1"
+
+      LOG_FILE="/var/log/contoso-oracle-setup.log"
+      READY_MARKER="/var/log/contoso-oracle-ready"
+      FAILED_MARKER="/var/log/contoso-oracle-failed"
+
+      # --------------------------------------------------------------------------
+      # Colour, TTY-safe. Honours NO_COLOR (https://no-color.org) and dumb terminals.
+      # cloud-init has no TTY, so on first boot this all collapses to plain text.
+      # --------------------------------------------------------------------------
+      if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != "dumb" ]]; then
+          C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+          C_RED=$'\033[31m';  C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+          C_BLUE=$'\033[34m'; C_CYAN=$'\033[36m'
+      else
+          C_RESET=''; C_BOLD=''; C_DIM=''
+          C_RED='';   C_GREEN=''; C_YELLOW=''
+          C_BLUE='';  C_CYAN=''
+      fi
+
+      ts()   { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+      hdr()  { printf '\n%s%s== %s ==%s  %s\n' "$C_BOLD" "$C_BLUE" "$*" "$C_RESET" "$(ts)"; }
+      ok()   { printf '  %s[ ok ]%s %s\n'   "$C_GREEN"  "$C_RESET" "$*"; }
+      bad()  { printf '  %s[FAIL]%s %s\n'   "$C_RED"    "$C_RESET" "$*"; }
+      warn() { printf '  %s[warn]%s %s\n'   "$C_YELLOW" "$C_RESET" "$*"; }
+      info() { printf '  %s[ .. ]%s %s\n'   "$C_CYAN"   "$C_RESET" "$*"; }
+      note() { printf '         %s%s%s\n'   "$C_DIM"    "$*" "$C_RESET"; }
+
+      # die <what> [how-to-fix]
+      die() {
+          printf '\n%s%sfatal:%s %s\n' "$C_BOLD" "$C_RED" "$C_RESET" "$1" >&2
+          [[ -n "${2:-}" ]] && printf '       %sfix: %s%s\n' "$C_DIM" "$2" "$C_RESET" >&2
+          exit 2
+      }
+
+      # --------------------------------------------------------------------------
+      # Options
+      # --------------------------------------------------------------------------
+      ENV_FILE="${CONTOSO_ORACLE_ENV_FILE:-/etc/contoso-oracle.env}"
+      SKIP_DISK=0
+      SKIP_DOCKER=0
+      SKIP_SCHEMA=0
+      FORCE_RECREATE=0
+      ALLOW_RESTART=1
+
+      usage() {
+          cat <<EOF
+      ${C_BOLD}${SCRIPT_NAME}${C_RESET} - build or repair the Contoso Store Oracle source database.
+
+      ${C_BOLD}USAGE${C_RESET}
+          sudo ${SCRIPT_NAME} [options]
+
+      ${C_BOLD}OPTIONS${C_RESET}
+          --env-file <path>  Read configuration from this file instead of
+                             ${ENV_FILE}. Real environment variables always win
+                             over the file.
+          --skip-disk        Do not touch partitions, filesystems or /etc/fstab.
+                             Use when /u01 is already mounted or you are running on
+                             a box with a single disk.
+          --skip-docker      Assume Docker CE is installed and configured.
+          --skip-schema      Bring the database up but do not create or alter the
+                             CONTOSO / reader accounts.
+          --recreate         Destroy and re-create the container. The datafiles on
+                             /u01 are NOT touched, so the database survives.
+          --no-restart       Never bounce the instance. The 'sessions' parameter is
+                             static, so this can leave sessions below the required
+                             value; the script says so and exits non-zero.
+          --timeout <sec>    How long to wait for the database to open.
+                             Default ${ORACLE_READY_TIMEOUT:-3600}s. The very first
+                             boot creates the database from scratch and genuinely
+                             does take 10-20 minutes.
+          -h, --help         This text.
+
+      ${C_BOLD}CONFIGURATION${C_RESET}
+          Required (no defaults, never hardcoded):
+            ORACLE_SYSTEM_PASSWORD      SYS / SYSTEM / PDBADMIN password
+            CONTOSO_PASSWORD            password for the schema owner
+
+          Optional:
+            ORACLE_MIGRATION_PASSWORD   password for the conversion tool's reader.
+                                        Unset means the reader is not created.
+            ORACLE_IMAGE                default container-registry.oracle.com/database/free:latest
+            ORACLE_CONTAINER_NAME       default contoso-oracle
+            ORACLE_SERVICE              default FREEPDB1
+            ORACLE_PORT                 default 1521
+            CONTOSO_SCHEMA              default CONTOSO
+            ORACLE_MIGRATION_USER       default O2P_READER
+            ORACLE_MIN_SESSIONS         default 50   (the contract's floor is >10)
+            ORACLE_PROCESSES            default 200
+            ORACLE_DATA_MOUNT           default /u01
+            ORACLE_DATA_DEVICE          default: auto-detected
+            CONTOSO_TABLESPACE          default CONTOSO_DATA
+            CONTOSO_TABLESPACE_MAXSIZE  default 8G
+            ORACLE_UTL_FILE_DIR_NAME    default CONTOSO_EXPORT_DIR
+            ORACLE_RESTART_POLICY       default unless-stopped
+            ORACLE_SGA_MB / ORACLE_PGA_MB   only used when creating the database
+
+          Or, with the VM's managed identity (no password on any command line):
+            USE_KEYVAULT=1
+            AZ_KEYVAULT_NAME=<vault>
+            KV_SECRET_ORACLE_SYSTEM_PASSWORD / KV_SECRET_CONTOSO_PASSWORD /
+            KV_SECRET_ORACLE_MIGRATION_PASSWORD
+
+      ${C_BOLD}EXAMPLES${C_RESET}
+          sudo ${SCRIPT_NAME}
+          sudo ORACLE_SYSTEM_PASSWORD='...' CONTOSO_PASSWORD='...' ${SCRIPT_NAME}
+          sudo ${SCRIPT_NAME} --recreate --skip-disk
+      EOF
+      }
+
+      while [[ $# -gt 0 ]]; do
+          case "$1" in
+              --env-file)   ENV_FILE="${2:?--env-file needs a path}"; shift 2 ;;
+              --skip-disk)  SKIP_DISK=1; shift ;;
+              --skip-docker) SKIP_DOCKER=1; shift ;;
+              --skip-schema) SKIP_SCHEMA=1; shift ;;
+              --recreate)   FORCE_RECREATE=1; shift ;;
+              --no-restart) ALLOW_RESTART=0; shift ;;
+              --timeout)    ORACLE_READY_TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
+              -h|--help)    usage; exit 0 ;;
+              *)            usage >&2; die "unknown option: $1" ;;
+          esac
+      done
+
+      # --------------------------------------------------------------------------
+      # Configuration
+      #
+      # Order of precedence: real environment variable, then the env file, then the
+      # default below. That ordering is the whole point of the dance with PRESET_*:
+      # cloud-init writes /etc/contoso-oracle.env, but a human repairing the box over
+      # SSH must still be able to say ORACLE_SYSTEM_PASSWORD=... ./install-oracle.sh
+      # and have it mean something.
+      # --------------------------------------------------------------------------
+      CONFIG_VARS="
+      ORACLE_SYSTEM_PASSWORD ORACLE_PASSWORD CONTOSO_PASSWORD ORACLE_MIGRATION_PASSWORD
+      ORACLE_IMAGE ORACLE_CONTAINER_NAME ORACLE_SERVICE ORACLE_PORT ORACLE_CDB_SERVICE
+      CONTOSO_SCHEMA ORACLE_MIGRATION_USER ORACLE_MIN_SESSIONS ORACLE_PROCESSES
+      ORACLE_DATA_MOUNT ORACLE_DATA_DEVICE CONTOSO_TABLESPACE CONTOSO_TABLESPACE_MAXSIZE
+      ORACLE_UTL_FILE_DIR_NAME ORACLE_RESTART_POLICY ORACLE_READY_TIMEOUT
+      ORACLE_POLL_INTERVAL ORACLE_SGA_MB ORACLE_PGA_MB ORACLE_CHARACTERSET
+      USE_KEYVAULT AZ_KEYVAULT_NAME KV_SECRET_ORACLE_SYSTEM_PASSWORD
+      KV_SECRET_CONTOSO_PASSWORD KV_SECRET_ORACLE_MIGRATION_PASSWORD
+      "
+
+      for _v in $CONFIG_VARS; do
+          # ${!_v+set} is "is it set at all", which is not the same as "is it empty".
+          if [[ -n "${!_v+set}" ]]; then eval "PRESET_${_v}=\${${_v}}"; fi
+      done
+
+      if [[ -f "$ENV_FILE" ]]; then
+          set -a
+          # shellcheck source=/dev/null
+          . "$ENV_FILE"
+          set +a
+          ENV_FILE_LOADED="$ENV_FILE"
+      else
+          ENV_FILE_LOADED=''
+      fi
+
+      for _v in $CONFIG_VARS; do
+          _p="PRESET_${_v}"
+          if [[ -n "${!_p+set}" ]]; then eval "${_v}=\${${_p}}"; fi
+      done
+      unset _v _p
+
+      # deploy.sh renders the ORACLE_PASSWORD and ORACLE_SYSTEM_PASSWORD placeholders
+      # in the cloud-init to the same value; accept either spelling so both stay
+      # wired up.
+      ORACLE_SYSTEM_PASSWORD="${ORACLE_SYSTEM_PASSWORD:-${ORACLE_PASSWORD:-}}"
+
+      ORACLE_IMAGE="${ORACLE_IMAGE:-container-registry.oracle.com/database/free:latest}"
+      ORACLE_CONTAINER_NAME="${ORACLE_CONTAINER_NAME:-contoso-oracle}"
+      ORACLE_SERVICE="${ORACLE_SERVICE:-FREEPDB1}"
+      ORACLE_CDB_SERVICE="${ORACLE_CDB_SERVICE:-FREE}"
+      ORACLE_PORT="${ORACLE_PORT:-1521}"
+      CONTOSO_SCHEMA="${CONTOSO_SCHEMA:-CONTOSO}"
+      ORACLE_MIGRATION_USER="${ORACLE_MIGRATION_USER:-O2P_READER}"
+      ORACLE_MIN_SESSIONS="${ORACLE_MIN_SESSIONS:-50}"
+      ORACLE_PROCESSES="${ORACLE_PROCESSES:-200}"
+      ORACLE_DATA_MOUNT="${ORACLE_DATA_MOUNT:-/u01}"
+      ORACLE_DATA_DEVICE="${ORACLE_DATA_DEVICE:-}"
+      CONTOSO_TABLESPACE="${CONTOSO_TABLESPACE:-CONTOSO_DATA}"
+      CONTOSO_TABLESPACE_MAXSIZE="${CONTOSO_TABLESPACE_MAXSIZE:-8G}"
+      ORACLE_UTL_FILE_DIR_NAME="${ORACLE_UTL_FILE_DIR_NAME:-CONTOSO_EXPORT_DIR}"
+      ORACLE_RESTART_POLICY="${ORACLE_RESTART_POLICY:-unless-stopped}"
+      ORACLE_READY_TIMEOUT="${ORACLE_READY_TIMEOUT:-3600}"
+      ORACLE_POLL_INTERVAL="${ORACLE_POLL_INTERVAL:-15}"
+      ORACLE_CHARACTERSET="${ORACLE_CHARACTERSET:-AL32UTF8}"
+      USE_KEYVAULT="${USE_KEYVAULT:-0}"
+
+      # Paths on the host, all under the data disk.
+      ORADATA_DIR="${ORACLE_DATA_MOUNT}/oradata"
+      UTL_FILE_DIR="${ORACLE_DATA_MOUNT}/utl_file"
+      SEED_DIR="${ORACLE_DATA_MOUNT}/seed"
+      DOCKER_ROOT_DIR="${ORACLE_DATA_MOUNT}/docker"
+
+      # Paths inside the container. Fixed by the Oracle image, except the two we mount.
+      C_ORADATA="/opt/oracle/oradata"
+      C_UTL_FILE="/opt/oracle/utl_file"
+      C_SEED="/opt/oracle/seed"
+
+      # The oracle account inside every official Oracle container image. A bind mount
+      # the container cannot write to is the single most common reason these images
+      # die on first boot, so the host directories are chowned to this.
+      ORACLE_UID=54321
+      ORACLE_GID=54321
+
+      export DEBIAN_FRONTEND=noninteractive
+      # Azure's Ubuntu images run unattended-upgrades at boot, which holds the dpkg
+      # lock for minutes. Without this every apt-get in a cloud-init is a coin toss.
+      APT_OPTS="-o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef"
+
+      # --------------------------------------------------------------------------
+      # Secrets
+      #
+      # Three sources, in order: the environment / env file; Key Vault via the VM's
+      # managed identity; nothing, which is a hard failure with a specific message.
+      #
+      # The Key Vault path uses IMDS and the REST API rather than the az CLI, because
+      # az is 400 MB of Python we would otherwise never need on this box, and because
+      # the token never appears in a process list this way.
+      # --------------------------------------------------------------------------
+      kv_secret() {
+          local name="$1" token value
+          [[ -n "${AZ_KEYVAULT_NAME:-}" ]] || return 1
+          [[ -n "$name" ]] || return 1
+          command -v jq >/dev/null 2>&1 || return 1
+
+          token="$(curl -sS -m 15 -H 'Metadata: true' \
+              'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net' \
+              2>/dev/null | jq -r '.access_token // empty' || true)"
+          [[ -n "$token" ]] || return 1
+
+          value="$(curl -sS -m 15 -H "Authorization: Bearer ${token}" \
+              "https://${AZ_KEYVAULT_NAME}.vault.azure.net/secrets/${name}?api-version=7.4" \
+              2>/dev/null | jq -r '.value // empty' || true)"
+          [[ -n "$value" ]] || return 1
+          printf '%s' "$value"
+      }
+
+      # resolve_secret <var-name> <keyvault-secret-var-name>
+      # Leaves the variable alone if it already has a value.
+      resolve_secret() {
+          local var="$1" kvvar="$2" current secret value
+          eval "current=\${${var}:-}"
+          if [[ -n "$current" ]]; then return 0; fi
+          if [[ "${USE_KEYVAULT:-0}" != "1" ]]; then return 0; fi
+          eval "secret=\${${kvvar}:-}"
+          [[ -n "$secret" ]] || return 0
+          if value="$(kv_secret "$secret")"; then
+              eval "${var}=\${value}"
+              info "${var} read from Key Vault secret ${secret}"
+          else
+              warn "could not read Key Vault secret ${secret} from ${AZ_KEYVAULT_NAME:-<unset>}"
+              note "the VM identity needs the 'Key Vault Secrets User' role on the vault"
+          fi
+      }
+
+      # A password with a double quote in it cannot be passed through ALTER USER
+      # ... IDENTIFIED BY "..." , and one with a single quote breaks the EXECUTE
+      # IMMEDIATE that creates the tablespace. Whitespace, '@' and '/' break sqlplus
+      # easy-connect strings later in the lab. Refuse early and say exactly why,
+      # rather than emitting a half-built database.
+      validate_password() {
+          local var="$1" value
+          eval "value=\${${var}:-}"
+          case "$value" in
+              *'"'*)  die "${var} contains a double quote" "pick a password without \" ' @ / \\ or spaces" ;;
+              *"'"*)  die "${var} contains a single quote" "pick a password without \" ' @ / \\ or spaces" ;;
+              *'@'*)  die "${var} contains '@'" "sqlplus easy-connect strings split on '@'; choose another password" ;;
+              *'/'*)  die "${var} contains '/'" "sqlplus easy-connect strings split on '/'; choose another password" ;;
+              *'\'*)  die "${var} contains a backslash" "pick a password without \" ' @ / \\ or spaces" ;;
+              *[[:space:]]*) die "${var} contains whitespace" "pick a password without \" ' @ / \\ or spaces" ;;
+          esac
+          if [[ ${#value} -lt 8 ]]; then
+              die "${var} is shorter than 8 characters" "Oracle rejects trivial passwords; use 12+ characters with a digit"
+          fi
+      }
+
+      # An identifier we are about to splice into SQL. Anything outside this set is a
+      # SQL injection waiting to happen, and there is no legitimate reason for it.
+      validate_identifier() {
+          local var="$1" value
+          eval "value=\${${var}:-}"
+          case "$value" in
+              ''|*[!A-Za-z0-9_]*) die "${var}='${value}' is not a plain SQL identifier" \
+                  "use letters, digits and underscore only" ;;
+          esac
+      }
+
+      require_root() {
+          [[ "$(id -u)" -eq 0 ]] || die "must run as root" "sudo ${SCRIPT_NAME}"
+      }
+
+      # --------------------------------------------------------------------------
+      # Step 1 - Docker CE from Docker's own apt repository
+      #
+      # Not docker.io from universe: that lags badly and has bitten labs with a
+      # containerd too old for the Oracle image's healthcheck semantics.
+      # --------------------------------------------------------------------------
+      step_docker_install() {
+          hdr "Docker CE"
+
+          if [[ "$SKIP_DOCKER" == "1" ]]; then
+              info "--skip-docker given"
+              command -v docker >/dev/null 2>&1 || die "--skip-docker but docker is not installed"
+              ok "docker $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ,) already present"
+              return 0
+          fi
+
+          if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+              ok "docker $(docker --version | awk '{print $3}' | tr -d ,) already installed and answering"
+          else
+              info "installing prerequisites"
+              apt-get $APT_OPTS update -qq
+              apt-get $APT_OPTS install -y -qq ca-certificates curl gnupg jq e2fsprogs util-linux >/dev/null
+
+              info "adding Docker's apt repository"
+              install -m 0755 -d /etc/apt/keyrings
+              if [[ ! -s /etc/apt/keyrings/docker.asc ]]; then
+                  curl -fsSL --retry 5 --retry-delay 5 https://download.docker.com/linux/ubuntu/gpg \
+                      -o /etc/apt/keyrings/docker.asc \
+                      || die "could not download the Docker apt key" "check the VM's outbound access to download.docker.com"
+                  chmod a+r /etc/apt/keyrings/docker.asc
+              fi
+
+              local arch codename repo_line
+              arch="$(dpkg --print-architecture)"
+              codename="$(. /etc/os-release && printf '%s' "${UBUNTU_CODENAME:-${VERSION_CODENAME:-jammy}}")"
+              repo_line="deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${codename} stable"
+              if [[ "$(cat /etc/apt/sources.list.d/docker.list 2>/dev/null || true)" != "$repo_line" ]]; then
+                  printf '%s\n' "$repo_line" > /etc/apt/sources.list.d/docker.list
+                  ok "wrote /etc/apt/sources.list.d/docker.list (${codename}/${arch})"
+              fi
+
+              info "installing docker-ce (this pulls ~120 MB)"
+              apt-get $APT_OPTS update -qq
+              apt-get $APT_OPTS install -y -qq \
+                  docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null \
+                  || die "docker-ce install failed" "see /var/log/apt/term.log and re-run ${SCRIPT_NAME}"
+              ok "docker $(docker --version | awk '{print $3}' | tr -d ,) installed"
+          fi
+
+          systemctl enable --now docker >/dev/null 2>&1 || true
+          systemctl is-active --quiet docker || die "the docker daemon is not running" "journalctl -u docker -n 50"
+
+          # Let the SSH admin (uid 1000 on an Azure Ubuntu image) drive docker without
+          # sudo, so repairing this box is not an exercise in typing sudo.
+          local admin_user
+          admin_user="$(getent passwd 1000 | cut -d: -f1 || true)"
+          if [[ -n "$admin_user" ]] && ! id -nG "$admin_user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+              usermod -aG docker "$admin_user" && ok "added ${admin_user} to the docker group (re-login to take effect)"
+          fi
+      }
+
+      # --------------------------------------------------------------------------
+      # Step 2 - the data disk
+      #
+      # The datafiles do not live on the OS disk. They live on the Premium SSD data
+      # disk, mounted at /u01, so the container is disposable and the database is not.
+      #
+      # This step is the one that can destroy data if written carelessly, so it is
+      # deliberately timid: it formats only a device that has no filesystem AND no
+      # partition table, and it refuses and explains itself in every other case.
+      # --------------------------------------------------------------------------
+      detect_data_disk() {
+          if [[ -n "$ORACLE_DATA_DEVICE" ]]; then
+              printf '%s' "$ORACLE_DATA_DEVICE"; return 0
+          fi
+
+          # The Azure Linux agent's udev rules give every data disk a stable name by
+          # LUN. The Bicep module attaches the Oracle disk at lun 0.
+          #
+          # Polled, not assumed: on first boot cloud-init can reach this point before
+          # udev has finished, and "no data disk found" 20 seconds too early is an
+          # infuriating way to lose a deployment.
+          local lun0 waited=0
+          while [[ $waited -lt 60 ]]; do
+              for lun0 in /dev/disk/azure/scsi1/lun0 /dev/disk/azure/data/by-lun/0; do
+                  if [[ -e "$lun0" ]]; then readlink -f "$lun0"; return 0; fi
+              done
+              # Only worth waiting on a box that has the azure udev rules at all.
+              [[ -d /dev/disk/azure ]] || break
+              sleep 3
+              waited=$(( waited + 3 ))
+          done
+
+          # Fallback heuristic for a box where those symlinks are missing. The two
+          # disks we must never touch are the OS disk and Azure's ephemeral resource
+          # disk - which is /dev/sdb on most sizes and is wiped on deallocate.
+          local root_disk resource_disk src cand
+          src="$(findmnt -no SOURCE / 2>/dev/null || true)"
+          root_disk="$(lsblk -no PKNAME "$src" 2>/dev/null | head -1 || true)"
+          src="$(findmnt -no SOURCE /mnt 2>/dev/null || true)"
+          resource_disk="$(lsblk -no PKNAME "$src" 2>/dev/null | head -1 || true)"
+
+          while read -r cand; do
+              [[ -n "$cand" ]] || continue
+              [[ "$cand" == "$root_disk" || "$cand" == "$resource_disk" ]] && continue
+              # No children means no partitions: an untouched data disk.
+              if [[ -z "$(lsblk -no NAME "/dev/${cand}" | tail -n +2)" ]]; then
+                  printf '/dev/%s' "$cand"; return 0
+              fi
+          done < <(lsblk -dno NAME,TYPE | awk '$2=="disk"{print $1}')
+
+          return 1
+      }
+
+      step_data_disk() {
+          hdr "Data disk -> ${ORACLE_DATA_MOUNT}"
+
+          if [[ "$SKIP_DISK" == "1" ]]; then
+              info "--skip-disk given; using ${ORACLE_DATA_MOUNT} as it is"
+              mkdir -p "$ORACLE_DATA_MOUNT"
+              return 0
+          fi
+
+          mkdir -p "$ORACLE_DATA_MOUNT"
+
+          if findmnt -no TARGET "$ORACLE_DATA_MOUNT" >/dev/null 2>&1; then
+              ok "${ORACLE_DATA_MOUNT} is already mounted from $(findmnt -no SOURCE "$ORACLE_DATA_MOUNT")"
+          else
+              local dev fstype
+              if ! dev="$(detect_data_disk)" || [[ -z "$dev" || ! -b "$dev" ]]; then
+                  die "no unused data disk found to mount at ${ORACLE_DATA_MOUNT}" \
+                      "attach a data disk at LUN 0, set ORACLE_DATA_DEVICE=/dev/sdX, or pass --skip-disk"
+              fi
+              info "candidate device ${dev} ($(lsblk -dno SIZE "$dev" | tr -d ' '))"
+
+              fstype="$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)"
+              if [[ -z "$fstype" ]]; then
+                  # Belt and braces: blkid can come up empty on a disk that has a
+                  # partition table with unformatted partitions. Formatting that would
+                  # eat someone's data.
+                  if [[ -n "$(lsblk -no NAME "$dev" | tail -n +2)" ]]; then
+                      die "${dev} has partitions but no filesystem on the whole device" \
+                          "inspect it with lsblk, then set ORACLE_DATA_DEVICE to the right partition"
+                  fi
+                  info "no filesystem on ${dev}; creating ext4 (this happens exactly once)"
+                  # Whole device, no partition table: nothing here needs to dual boot,
+                  # and it keeps 'resize2fs after growing the disk' a one-liner.
+                  # -m 0 gives back the 5% root reserve, which is pointless on a
+                  # dedicated data volume.
+                  mkfs.ext4 -q -F -m 0 -L CONTOSO_U01 "$dev" \
+                      || die "mkfs.ext4 failed on ${dev}"
+                  ok "ext4 filesystem created on ${dev}"
+              else
+                  ok "${dev} already carries a ${fstype} filesystem; leaving it alone"
+              fi
+
+              local uuid
+              uuid="$(blkid -o value -s UUID "$dev" 2>/dev/null || true)"
+              [[ -n "$uuid" ]] || die "could not read a UUID from ${dev}"
+
+              # fstab by UUID, never by /dev/sdX: Azure does not promise the device
+              # name survives a reboot, and a wrong one means the datafiles quietly
+              # land on the OS disk.
+              #
+              # nofail keeps a missing disk from dropping the VM into emergency mode
+              # where it has no network and no Bastion, which is unrecoverable.
+              local fstab_line
+              fstab_line="UUID=${uuid} ${ORACLE_DATA_MOUNT} ext4 defaults,noatime,nofail,x-systemd.device-timeout=30s 0 2"
+              if grep -qs -- "^UUID=${uuid}[[:space:]]" /etc/fstab; then
+                  ok "/etc/fstab already has an entry for UUID=${uuid}"
+              else
+                  [[ -f /etc/fstab.contoso-oracle.bak ]] || cp -a /etc/fstab /etc/fstab.contoso-oracle.bak
+                  # Drop any stale entry for this mount point before adding ours.
+                  grep -v -E "[[:space:]]${ORACLE_DATA_MOUNT}[[:space:]]" /etc/fstab > /etc/fstab.new || true
+                  printf '\n# Contoso Store Oracle lab - datafiles for %s\n%s\n' \
+                      "$ORACLE_CONTAINER_NAME" "$fstab_line" >> /etc/fstab.new
+                  mv /etc/fstab.new /etc/fstab
+                  ok "added ${ORACLE_DATA_MOUNT} to /etc/fstab by UUID"
+              fi
+
+              systemctl daemon-reload >/dev/null 2>&1 || true
+              mount "$ORACLE_DATA_MOUNT" 2>/dev/null || mount -a \
+                  || die "could not mount ${ORACLE_DATA_MOUNT}" "check /etc/fstab and 'journalctl -xe'"
+              findmnt -no TARGET "$ORACLE_DATA_MOUNT" >/dev/null 2>&1 \
+                  || die "${ORACLE_DATA_MOUNT} still is not mounted"
+              ok "mounted ${dev} (UUID=${uuid}) at ${ORACLE_DATA_MOUNT}"
+          fi
+
+          mkdir -p "$ORADATA_DIR" "$UTL_FILE_DIR" "$SEED_DIR"
+          # The oracle user inside the image is uid/gid 54321. A bind mount it cannot
+          # write to is the classic "container exits during database creation".
+          chown -R "${ORACLE_UID}:${ORACLE_GID}" "$ORADATA_DIR" "$UTL_FILE_DIR" "$SEED_DIR"
+          chmod 0750 "$ORADATA_DIR"
+          chmod 0770 "$UTL_FILE_DIR" "$SEED_DIR"
+          ok "${ORADATA_DIR}, ${UTL_FILE_DIR} and ${SEED_DIR} owned by ${ORACLE_UID}:${ORACLE_GID}"
+          df -h "$ORACLE_DATA_MOUNT" | tail -1 | sed 's/^/         /'
+      }
+
+      # --------------------------------------------------------------------------
+      # Step 3 - point Docker at the data disk
+      #
+      # The Oracle Free image is ~9 GB compressed and rather more unpacked. The OS
+      # disk is 64 GB and also holds the logs, so the image goes on the data disk.
+      # Done before the first pull so nothing has to be re-downloaded.
+      # --------------------------------------------------------------------------
+      step_docker_daemon() {
+          hdr "Docker daemon configuration"
+
+          if [[ "$SKIP_DOCKER" == "1" ]]; then info "--skip-docker given"; return 0; fi
+          if ! findmnt -no TARGET "$ORACLE_DATA_MOUNT" >/dev/null 2>&1; then
+              warn "${ORACLE_DATA_MOUNT} is not a mount point; leaving the Docker data-root on the OS disk"
+              return 0
+          fi
+
+          mkdir -p "$DOCKER_ROOT_DIR"
+          local desired current
+          # log-opts: an Oracle container left running for a week will otherwise write
+          # an unbounded json log onto the same volume as the datafiles.
+          desired="$(cat <<JSON
+      {
+        "data-root": "${DOCKER_ROOT_DIR}",
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "50m",
+          "max-file": "5"
+        },
+        "live-restore": true
+      }
+      JSON
+      )"
+          current="$(cat /etc/docker/daemon.json 2>/dev/null || true)"
+          if [[ "$current" == "$desired" ]]; then
+              ok "/etc/docker/daemon.json already correct (data-root ${DOCKER_ROOT_DIR})"
+              return 0
+          fi
+
+          mkdir -p /etc/docker
+          printf '%s\n' "$desired" > /etc/docker/daemon.json
+          ok "wrote /etc/docker/daemon.json (data-root ${DOCKER_ROOT_DIR}, capped container log)"
+          info "restarting docker to pick it up"
+          systemctl restart docker || die "docker would not restart with the new daemon.json" \
+              "journalctl -u docker -n 50; remove /etc/docker/daemon.json to fall back"
+          # The daemon accepts the socket before it is fully ready; poll rather than sleep.
+          local waited=0
+          while [[ $waited -lt 60 ]]; do
+              docker info >/dev/null 2>&1 && break
+              sleep 2
+              waited=$(( waited + 2 ))
+          done
+          docker info >/dev/null 2>&1 || die "docker is not answering after the restart"
+          ok "docker restarted"
+      }
+
+      # --------------------------------------------------------------------------
+      # Step 4 - pull the image
+      #
+      # container-registry.oracle.com/database/free is one of the few Oracle images
+      # that needs no docker login and no click-through licence acceptance.
+      # --------------------------------------------------------------------------
+      step_pull_image() {
+          hdr "Oracle image"
+
+          if docker image inspect "$ORACLE_IMAGE" >/dev/null 2>&1; then
+              ok "${ORACLE_IMAGE} already present locally"
+              # Still worth a refresh attempt on a floating tag like :latest, but a
+              # failure here is not fatal - we have a usable image.
+              if [[ "$ORACLE_IMAGE" == *:latest ]]; then
+                  info "refreshing the :latest tag (failure here is not fatal)"
+                  docker pull -q "$ORACLE_IMAGE" >/dev/null 2>&1 \
+                      && ok "refreshed" || warn "could not refresh; using the local copy"
+              fi
+              return 0
+          fi
+
+          info "pulling ${ORACLE_IMAGE} - this is roughly 9 GB and takes a few minutes"
+          local attempt
+          for attempt in 1 2 3; do
+              if docker pull "$ORACLE_IMAGE"; then
+                  ok "pulled ${ORACLE_IMAGE}"
+                  return 0
+              fi
+              warn "pull attempt ${attempt} failed"
+              sleep $(( attempt * 20 ))
+          done
+          die "could not pull ${ORACLE_IMAGE} after 3 attempts" \
+              "check outbound HTTPS to container-registry.oracle.com, then re-run ${SCRIPT_NAME}"
+      }
+
+      # --------------------------------------------------------------------------
+      # Step 5 - run the container
+      #
+      # The container is cattle. Everything that matters is on the bind mount, so
+      # this function will happily destroy and re-create it, but it will never touch
+      # ${ORADATA_DIR}.
+      # --------------------------------------------------------------------------
+      container_exists()  { docker container inspect "$ORACLE_CONTAINER_NAME" >/dev/null 2>&1; }
+      container_running() { [[ "$(docker container inspect -f '{{.State.Running}}' "$ORACLE_CONTAINER_NAME" 2>/dev/null || echo false)" == "true" ]]; }
+
+      # Is the existing container built the way we would build it today?
+      container_matches_spec() {
+          local want_image_id have_image_id have_mount have_port
+          want_image_id="$(docker image inspect -f '{{.Id}}' "$ORACLE_IMAGE" 2>/dev/null || true)"
+          have_image_id="$(docker container inspect -f '{{.Image}}' "$ORACLE_CONTAINER_NAME" 2>/dev/null || true)"
+          [[ -n "$want_image_id" && "$want_image_id" == "$have_image_id" ]] || { echo "image"; return 1; }
+
+          have_mount="$(docker container inspect \
+              -f '{{range .Mounts}}{{if eq .Destination "'"$C_ORADATA"'"}}{{.Source}}{{end}}{{end}}' \
+              "$ORACLE_CONTAINER_NAME" 2>/dev/null || true)"
+          [[ "$have_mount" == "$ORADATA_DIR" ]] || { echo "oradata mount"; return 1; }
+
+          have_port="$(docker container inspect \
+              -f '{{range $p, $c := .HostConfig.PortBindings}}{{$p}} {{end}}' \
+              "$ORACLE_CONTAINER_NAME" 2>/dev/null || true)"
+          case "$have_port" in *"1521/tcp"*) : ;; *) echo "port binding"; return 1 ;; esac
+
+          return 0
+      }
+
+      step_run_container() {
+          hdr "Container ${ORACLE_CONTAINER_NAME}"
+
+          if container_exists && [[ "$FORCE_RECREATE" == "1" ]]; then
+              info "--recreate given; removing the container (the datafiles stay on ${ORADATA_DIR})"
+              docker rm -f "$ORACLE_CONTAINER_NAME" >/dev/null
+          elif container_exists; then
+              local mismatch
+              if mismatch="$(container_matches_spec)"; then
+                  if container_running; then
+                      ok "container already running from the expected image and mounts"
+                      return 0
+                  fi
+                  info "container exists but is stopped; starting it"
+                  docker start "$ORACLE_CONTAINER_NAME" >/dev/null \
+                      || die "could not start ${ORACLE_CONTAINER_NAME}" "docker logs ${ORACLE_CONTAINER_NAME}"
+                  ok "started"
+                  return 0
+              fi
+              warn "existing container differs from the desired spec (${mismatch}); re-creating it"
+              note "this destroys the container only - ${ORADATA_DIR} is untouched"
+              docker rm -f "$ORACLE_CONTAINER_NAME" >/dev/null
+          fi
+
+          # Optional sizing. Oracle Database Free caps itself at 2 GB of RAM and
+          # 2 CPUs no matter what we ask for, so these only ever shrink it. They are
+          # read at database CREATION time; on an existing datafile set they do
+          # nothing, which is why they are not part of container_matches_spec.
+          #
+          # ORACLE_PWD is the image's own variable for SYS / SYSTEM / PDBADMIN, and
+          # it goes in this file rather than in a -e flag: anything in a -e flag is
+          # in the docker CLI's argv and therefore in `ps` output for the lifetime of
+          # the call. The file is mode 0600 and is deleted immediately afterwards.
+          #
+          # This is a mitigation, not a fix. `docker inspect` will show ORACLE_PWD in
+          # the container's config for as long as the container exists - that is how
+          # the Oracle image is built and there is nothing this script can do about
+          # it. Treat the VM as holding the credential.
+          local envfile
+          envfile="$(mktemp "${TMPDIR:-/tmp}/contoso-oracle-run.XXXXXX")"
+          chmod 0600 "$envfile"
+          {
+              printf 'ORACLE_PWD=%s\n'          "$ORACLE_SYSTEM_PASSWORD"
+              printf 'ORACLE_CHARACTERSET=%s\n' "$ORACLE_CHARACTERSET"
+              [[ -n "${ORACLE_SGA_MB:-}" ]] && printf 'INIT_SGA_SIZE=%s\n' "$ORACLE_SGA_MB"
+              [[ -n "${ORACLE_PGA_MB:-}" ]] && printf 'INIT_PGA_SIZE=%s\n' "$ORACLE_PGA_MB"
+              # Unconditional, and last: the exit status of this group is the status
+              # of its final command, and a group ending in a false [[ ]] test would
+              # look like a write failure.
+              printf 'TZ=UTC\n'
+          } > "$envfile"
+
+          info "creating ${ORACLE_CONTAINER_NAME} from ${ORACLE_IMAGE}"
+          # --shm-size: the 64 MB Docker default is far too small for an Oracle SGA
+          #   and shows up as a baffling ORA-00845 at startup.
+          # --stop-timeout: the image traps SIGTERM and runs SHUTDOWN IMMEDIATE.
+          #   Docker's 10 second default would SIGKILL it mid-shutdown and leave the
+          #   database needing instance recovery on every 'docker stop'.
+          docker run -d \
+              --name "$ORACLE_CONTAINER_NAME" \
+              --hostname "$ORACLE_CONTAINER_NAME" \
+              --restart "$ORACLE_RESTART_POLICY" \
+              --stop-timeout 180 \
+              --shm-size=2g \
+              --ulimit nofile=65536:65536 \
+              -p "${ORACLE_PORT}:1521" \
+              --env-file "$envfile" \
+              -v "${ORADATA_DIR}:${C_ORADATA}" \
+              -v "${UTL_FILE_DIR}:${C_UTL_FILE}" \
+              -v "${SEED_DIR}:${C_SEED}" \
+              "$ORACLE_IMAGE" >/dev/null \
+              || { rm -f "$envfile"
+                   die "docker run failed for ${ORACLE_CONTAINER_NAME}" "docker logs ${ORACLE_CONTAINER_NAME}"; }
+          rm -f "$envfile"
+
+          ok "container created, listening on host port ${ORACLE_PORT}"
+          if [[ -z "$(ls -A "$ORADATA_DIR" 2>/dev/null)" ]]; then
+              note "${ORADATA_DIR} is empty, so this run CREATES the database from scratch:"
+              note "expect 10-20 minutes before it opens. Nothing is wrong."
+          fi
+      }
+
+      # --------------------------------------------------------------------------
+      # Step 6 - wait for the database to actually be open
+      #
+      # Polling, not sleeping. Two conditions have to hold: the CDB instance reports
+      # OPEN, and the PDB the whole lab connects to is READ WRITE. A container that
+      # is "running" satisfies neither for the first quarter of an hour.
+      # --------------------------------------------------------------------------
+
+      # sqlplus_sysdba <sql-text> -> stdout, never fails the script
+      # SET DEFINE OFF matters: without it sqlplus treats '&' in a password as a
+      # substitution variable and silently prompts, hanging cloud-init forever.
+      sqlplus_sysdba() {
+          local sql="$1"
+          printf '%s\n' \
+              "set define off" \
+              "set heading off feedback off pagesize 0 linesize 4000 trimspool on verify off echo off" \
+              "$sql" \
+              "exit" \
+          | docker exec -i "$ORACLE_CONTAINER_NAME" sqlplus -s -L "/ as sysdba" 2>&1 || true
+      }
+
+      # oracle_scalar <select-statement> -> first non-empty trimmed line
+      oracle_scalar() {
+          sqlplus_sysdba "$1" \
+              | tr -d '\r' \
+              | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+              | grep -v '^$' \
+              | head -1 || true
+      }
+
+      instance_is_open() {
+          [[ "$(oracle_scalar "select 'STATUS='||status from v\$instance;")" == "STATUS=OPEN" ]]
+      }
+
+      pdb_open_mode() {
+          oracle_scalar "select 'MODE='||open_mode from v\$pdbs where name='${ORACLE_SERVICE}';" \
+              | sed -n 's/^MODE=//p'
+      }
+
+      wait_for_database() {
+          hdr "Waiting for the database to open"
+
+          local deadline=$(( SECONDS + ORACLE_READY_TIMEOUT ))
+          local last_note=0 elapsed state
+          info "polling every ${ORACLE_POLL_INTERVAL}s, giving up after ${ORACLE_READY_TIMEOUT}s"
+
+          while [[ $SECONDS -lt $deadline ]]; do
+              elapsed=$(( SECONDS ))
+
+              if ! container_running; then
+                  local exit_code
+                  exit_code="$(docker container inspect -f '{{.State.ExitCode}}' "$ORACLE_CONTAINER_NAME" 2>/dev/null || echo '?')"
+                  printf '\n'
+                  docker logs --tail 40 "$ORACLE_CONTAINER_NAME" 2>&1 | sed 's/^/         /' || true
+                  die "container ${ORACLE_CONTAINER_NAME} exited (code ${exit_code}) before the database opened" \
+                      "the last 40 log lines are above; a permissions problem on ${ORADATA_DIR} is the usual cause"
+              fi
+
+              if instance_is_open; then
+                  ok "instance is OPEN after ${elapsed}s"
+                  return 0
+              fi
+
+              # Progress every couple of minutes, so a human watching cloud-init can
+              # tell the difference between "slow" and "wedged".
+              if [[ $(( elapsed - last_note )) -ge 120 ]]; then
+                  state="$(docker container inspect -f '{{.State.Health.Status}}' "$ORACLE_CONTAINER_NAME" 2>/dev/null || true)"
+                  info "still waiting (${elapsed}s elapsed, container health: ${state:-unknown})"
+                  docker logs --tail 1 "$ORACLE_CONTAINER_NAME" 2>&1 | sed 's/^/         /' || true
+                  last_note=$elapsed
+              fi
+              sleep "$ORACLE_POLL_INTERVAL"
+          done
+
+          printf '\n'
+          docker logs --tail 40 "$ORACLE_CONTAINER_NAME" 2>&1 | sed 's/^/         /' || true
+          die "database did not open within ${ORACLE_READY_TIMEOUT}s" \
+              "the last 40 log lines are above; re-run with --timeout 7200 if the disk is just slow"
+      }
+
+      # The image opens the PDB itself, but a container that was killed mid-shutdown
+      # can come back with it MOUNTED. SAVE STATE makes the open stick across
+      # restarts so the next 'docker restart' does not need this.
+      ensure_pdb_open() {
+          local mode
+          mode="$(pdb_open_mode)"
+          if [[ "$mode" == "READ WRITE" ]]; then
+              ok "${ORACLE_SERVICE} is READ WRITE"
+          else
+              info "${ORACLE_SERVICE} is '${mode:-not present}'; opening it"
+              sqlplus_sysdba "whenever sqlerror exit failure
+      alter pluggable database ${ORACLE_SERVICE} open;" >/dev/null
+              mode="$(pdb_open_mode)"
+              [[ "$mode" == "READ WRITE" ]] \
+                  || die "${ORACLE_SERVICE} is '${mode:-not present}' and would not open" \
+                         "docker logs ${ORACLE_CONTAINER_NAME}"
+              ok "${ORACLE_SERVICE} opened"
+          fi
+          sqlplus_sysdba "alter pluggable database ${ORACLE_SERVICE} save state;" >/dev/null || true
+      }
+
+      # run_sql_checked <label> <sql-text>
+      # The SQL text is never echoed, because some of it contains passwords. Only
+      # sqlplus's own output reaches the log.
+      run_sql_checked() {
+          local label="$1" sql="$2" out rc=0
+          out="$(printf '%s\n' \
+                  "set define off" \
+                  "set heading off feedback off pagesize 0 linesize 4000 trimspool on verify off echo off" \
+                  "set serveroutput on size unlimited" \
+                  "$sql" \
+                  "exit" \
+              | docker exec -i "$ORACLE_CONTAINER_NAME" sqlplus -s -L "/ as sysdba" 2>&1)" || rc=$?
+          printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | sed 's/^/         /' || true
+          [[ $rc -eq 0 ]] || die "${label}: sqlplus exited ${rc}" \
+              "the Oracle error is above; fix it and re-run ${SCRIPT_NAME}"
+          ok "$label"
+      }
+
+      # --------------------------------------------------------------------------
+      # Step 7 - the 'sessions' parameter
+      #
+      # The conversion tool reads Oracle metadata in parallel and Microsoft documents
+      # a hard requirement of sessions > 10. SESSIONS is a STATIC parameter: it can
+      # only be written to the spfile, and only takes effect after a restart.
+      #
+      # SESSIONS also has to stay comfortably above PROCESSES, because the background
+      # processes consume sessions too. Setting it below that is how you get an
+      # instance that will not start at all - so both are set together, using
+      # Oracle's own derivation (1.5 * processes + 22) as the floor.
+      # --------------------------------------------------------------------------
+      step_sessions() {
+          hdr "Instance parameters"
+
+          local proc_target sess_floor sess_target cur_sessions cur_processes
+          proc_target="$ORACLE_PROCESSES"
+          sess_floor=$(( (proc_target * 3) / 2 + 22 ))
+          sess_target="$ORACLE_MIN_SESSIONS"
+          [[ $sess_target -lt $sess_floor ]] && sess_target=$sess_floor
+          [[ $sess_target -gt 10 ]] || die "computed sessions target ${sess_target} is not above 10" \
+              "raise ORACLE_MIN_SESSIONS"
+
+          cur_sessions="$(oracle_scalar "select value from v\$parameter where name='sessions';")"
+          cur_processes="$(oracle_scalar "select value from v\$parameter where name='processes';")"
+          info "current: sessions=${cur_sessions:-?} processes=${cur_processes:-?}"
+          info "target:  sessions=${sess_target} processes=${proc_target}"
+
+          case "$cur_sessions" in ''|*[!0-9]*) die "could not read the sessions parameter" "docker logs ${ORACLE_CONTAINER_NAME}" ;; esac
+          case "$cur_processes" in ''|*[!0-9]*) cur_processes=0 ;; esac
+
+          if [[ "$cur_sessions" -ge "$sess_target" && "$cur_processes" -ge "$proc_target" ]]; then
+              ok "sessions=${cur_sessions} already meets the requirement (>10, and >=${sess_target})"
+              SESSIONS_FINAL="$cur_sessions"
+              PROCESSES_FINAL="$cur_processes"
+              return 0
+          fi
+
+          if [[ "$ALLOW_RESTART" != "1" ]]; then
+              bad "sessions=${cur_sessions} is below the target and --no-restart was given"
+              die "cannot raise a static parameter without bouncing the instance" \
+                  "re-run without --no-restart"
+          fi
+
+          # Both parameters are CDB-wide, so this must happen in CDB$ROOT.
+          run_sql_checked "wrote processes=${proc_target} and sessions=${sess_target} to the spfile" \
+      "whenever sqlerror exit failure
+      alter session set container = cdb\$root;
+      alter system set processes = ${proc_target} scope=spfile;
+      alter system set sessions  = ${sess_target} scope=spfile;"
+
+          info "restarting the container so the static parameters take effect"
+          # -t 180 so the image's SIGTERM handler gets to run SHUTDOWN IMMEDIATE.
+          docker restart -t 180 "$ORACLE_CONTAINER_NAME" >/dev/null \
+              || die "could not restart ${ORACLE_CONTAINER_NAME}" "docker logs ${ORACLE_CONTAINER_NAME}"
+
+          wait_for_database
+          ensure_pdb_open
+
+          cur_sessions="$(oracle_scalar "select value from v\$parameter where name='sessions';")"
+          cur_processes="$(oracle_scalar "select value from v\$parameter where name='processes';")"
+          case "$cur_sessions" in ''|*[!0-9]*) die "could not re-read the sessions parameter after the restart" ;; esac
+          [[ "$cur_sessions" -gt 10 ]] || die "sessions is ${cur_sessions} after the restart, which is not above 10" \
+              "check 'show parameter sessions' by hand; Oracle may have clamped it"
+          ok "sessions=${cur_sessions} processes=${cur_processes} after the restart"
+          SESSIONS_FINAL="$cur_sessions"
+          PROCESSES_FINAL="$cur_processes"
+      }
+
+      # --------------------------------------------------------------------------
+      # Step 8 - the CONTOSO schema owner and the conversion tool's reader
+      #
+      # Idempotency here is done the boring way: CREATE with errors ignored, then
+      # ALTER unconditionally. Re-running converges the password, the quota and the
+      # default tablespace without a single DROP anywhere near the schema.
+      #
+      # The passwords are spliced into the SQL text and piped to sqlplus on stdin.
+      # They never appear on a command line, in the process list, in a temp file, or
+      # in the log.
+      # --------------------------------------------------------------------------
+      step_schema() {
+          hdr "Schema ${CONTOSO_SCHEMA} in ${ORACLE_SERVICE}"
+
+          if [[ "$SKIP_SCHEMA" == "1" ]]; then info "--skip-schema given"; return 0; fi
+
+          # ---------------------------------------------------------------- CDB
+          # SYS and SYSTEM are common users, so their passwords are set once in the
+          # root and apply everywhere. This is also what makes a re-run with a
+          # rotated ORACLE_SYSTEM_PASSWORD converge instead of quietly disagreeing
+          # with .env.
+          #
+          # Every value below is interpolated straight into the string. That is
+          # deliberate: ${var//pattern/replacement} would be tidier to read, but from
+          # bash 5.2 an '&' in the REPLACEMENT means "the text that matched", so a
+          # password containing '&' silently becomes the placeholder. Passwords are
+          # exactly the values most likely to contain one.
+          local sql
+          sql="whenever sqlerror exit failure
+      alter session set container = cdb\$root;
+      alter user sys    identified by \"${ORACLE_SYSTEM_PASSWORD}\";
+      alter user system identified by \"${ORACLE_SYSTEM_PASSWORD}\" account unlock;"
+          run_sql_checked "SYS and SYSTEM passwords match ORACLE_SYSTEM_PASSWORD" "$sql"
+
+          # ---------------------------------------------------------------- PDB
+          # A dedicated tablespace on the data disk, sized for the seed. The datafile
+          # path is derived from where SYSTEM's datafile already lives, because the
+          # image does not set db_create_file_dest and a hardcoded path breaks the
+          # moment Oracle changes its layout.
+          local tbs_file
+          tbs_file="$(printf '%s' "$CONTOSO_TABLESPACE" | tr 'A-Z' 'a-z')01"
+          sql="whenever sqlerror exit failure
+      alter session set container = ${ORACLE_SERVICE};
+      declare
+        v_dir varchar2(1024);
+        v_cnt pls_integer;
+      begin
+        select count(*) into v_cnt from dba_tablespaces where tablespace_name = '${CONTOSO_TABLESPACE}';
+        if v_cnt > 0 then
+          dbms_output.put_line('tablespace ${CONTOSO_TABLESPACE} already exists');
+          return;
+        end if;
+        select substr(file_name, 1, instr(file_name, '/', -1)) into v_dir
+          from (select file_name from dba_data_files where tablespace_name = 'SYSTEM' order by file_id)
+         where rownum = 1;
+        execute immediate 'create tablespace ${CONTOSO_TABLESPACE} datafile ''' || v_dir ||
+                          '${tbs_file}.dbf'' size 256m reuse autoextend on next 128m maxsize ${CONTOSO_TABLESPACE_MAXSIZE}';
+        dbms_output.put_line('created tablespace ${CONTOSO_TABLESPACE} at ' || v_dir);
+      end;
+      /"
+          run_sql_checked "tablespace ${CONTOSO_TABLESPACE}" "$sql"
+
+          # The user itself. ORA-01920 on the CREATE is expected on every re-run and
+          # is why the CREATE runs with errors tolerated.
+          sql="alter session set container = ${ORACLE_SERVICE};
+      prompt -- an ORA-01920 on the next statement is expected when re-running
+      whenever sqlerror continue none
+      create user ${CONTOSO_SCHEMA} identified by \"${CONTOSO_PASSWORD}\";
+      whenever sqlerror exit failure
+      alter user ${CONTOSO_SCHEMA} identified by \"${CONTOSO_PASSWORD}\"
+        account unlock
+        default tablespace ${CONTOSO_TABLESPACE}
+        temporary tablespace temp
+        quota unlimited on ${CONTOSO_TABLESPACE};
+      whenever sqlerror continue none
+      alter user ${CONTOSO_SCHEMA} quota unlimited on users;
+      whenever sqlerror exit failure"
+          run_sql_checked "user ${CONTOSO_SCHEMA} exists with an unlimited quota on ${CONTOSO_TABLESPACE}" "$sql"
+
+          step_grants
+          step_directory
+          step_reader
+          step_verify_schema
+      }
+
+      # --------------------------------------------------------------------------
+      # Privileges for the schema owner.
+      #
+      # CONTOSO owns roughly 1,820 objects covering every object type the lab needs to
+      # throw at the converter: types and type bodies, packages, materialised views
+      # with refresh groups, scheduler jobs, contexts, dimensions, operators. Each of
+      # those needs its own CREATE privilege, and RESOURCE does not include them.
+      #
+      # This block tolerates individual failures on purpose. Which SYS packages exist
+      # varies between 19c, 21c and 23ai, and a missing DBMS_XMLGEN is not a reason to
+      # abandon a 20 minute build. The privileges that actually matter are asserted
+      # afterwards in step_verify_schema, which does fail hard.
+      # --------------------------------------------------------------------------
+      step_grants() {
+          local sql
+          sql="alter session set container = ${ORACLE_SERVICE};
+      prompt -- individual failures below are tolerated; the required set is verified afterwards
+      whenever sqlerror continue none
+
+      grant create session               to ${CONTOSO_SCHEMA};
+      grant alter session                to ${CONTOSO_SCHEMA};
+      grant create table                 to ${CONTOSO_SCHEMA};
+      grant create view                  to ${CONTOSO_SCHEMA};
+      grant create sequence              to ${CONTOSO_SCHEMA};
+      grant create procedure             to ${CONTOSO_SCHEMA};
+      grant create trigger               to ${CONTOSO_SCHEMA};
+      grant create type                  to ${CONTOSO_SCHEMA};
+      grant create synonym               to ${CONTOSO_SCHEMA};
+      grant create public synonym        to ${CONTOSO_SCHEMA};
+      grant drop public synonym          to ${CONTOSO_SCHEMA};
+      grant create materialized view     to ${CONTOSO_SCHEMA};
+      grant create dimension             to ${CONTOSO_SCHEMA};
+      grant create cluster               to ${CONTOSO_SCHEMA};
+      grant create indextype             to ${CONTOSO_SCHEMA};
+      grant create operator              to ${CONTOSO_SCHEMA};
+      grant create job                   to ${CONTOSO_SCHEMA};
+      grant create database link         to ${CONTOSO_SCHEMA};
+      grant create any context           to ${CONTOSO_SCHEMA};
+      grant drop any context             to ${CONTOSO_SCHEMA};
+      grant query rewrite                to ${CONTOSO_SCHEMA};
+      grant on commit refresh            to ${CONTOSO_SCHEMA};
+      grant debug connect session        to ${CONTOSO_SCHEMA};
+      grant select_catalog_role          to ${CONTOSO_SCHEMA};
+
+      grant execute on sys.dbms_lock       to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_crypto     to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_sql        to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_lob        to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_random     to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_output     to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_utility    to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_session    to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_scheduler  to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_mview      to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_stats      to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_metadata   to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_errlog     to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_flashback  to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_rls        to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_pipe       to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_alert      to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_aq         to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_aqadm      to ${CONTOSO_SCHEMA};
+      grant execute on sys.dbms_xmlgen     to ${CONTOSO_SCHEMA};
+      grant execute on sys.utl_file        to ${CONTOSO_SCHEMA};
+      grant execute on sys.utl_raw         to ${CONTOSO_SCHEMA};
+      grant execute on sys.utl_i18n        to ${CONTOSO_SCHEMA};
+
+      grant select on sys.v_\$instance     to ${CONTOSO_SCHEMA};
+      grant select on sys.v_\$database     to ${CONTOSO_SCHEMA};
+      grant select on sys.v_\$session      to ${CONTOSO_SCHEMA};
+      grant select on sys.v_\$mystat       to ${CONTOSO_SCHEMA};
+      grant select on sys.v_\$parameter    to ${CONTOSO_SCHEMA};
+      grant select on sys.v_\$sql          to ${CONTOSO_SCHEMA};
+
+      whenever sqlerror exit failure"
+          run_sql_checked "privileges granted to ${CONTOSO_SCHEMA}" "$sql"
+      }
+
+      # --------------------------------------------------------------------------
+      # The UTL_FILE directory.
+      #
+      # pkg_etl_export writes flat files through UTL_FILE, so the DIRECTORY has to
+      # point at a path inside the container that is bind-mounted back to the data
+      # disk - otherwise the extracts vanish with the container.
+      #
+      # src/oracle/00-user-tablespace.sql re-creates this object; CREATE OR REPLACE
+      # can run in either order without a fight.
+      # --------------------------------------------------------------------------
+      step_directory() {
+          local sql
+          sql="whenever sqlerror exit failure
+      alter session set container = ${ORACLE_SERVICE};
+      create or replace directory ${ORACLE_UTL_FILE_DIR_NAME} as '${C_UTL_FILE}';
+      grant read, write on directory ${ORACLE_UTL_FILE_DIR_NAME} to ${CONTOSO_SCHEMA};"
+          run_sql_checked "directory ${ORACLE_UTL_FILE_DIR_NAME} -> ${C_UTL_FILE} (host ${UTL_FILE_DIR})" "$sql"
+      }
+
+      # --------------------------------------------------------------------------
+      # The conversion tool's login.
+      #
+      # Microsoft documents exactly this set: CONNECT, plus SELECT_CATALOG_ROLE or
+      # SELECT ANY DICTIONARY, plus SELECT on SYS.ARGUMENT$ - the last one is the
+      # easily-missed one, and without it the tool reads no procedure arguments and
+      # silently converts signatures wrongly. The account reads metadata only; it is
+      # never given a single privilege on a CONTOSO table.
+      # --------------------------------------------------------------------------
+      step_reader() {
+          if [[ -z "${ORACLE_MIGRATION_PASSWORD:-}" ]]; then
+              warn "ORACLE_MIGRATION_PASSWORD is not set; skipping the ${ORACLE_MIGRATION_USER} account"
+              note "the conversion tool can log in as ${CONTOSO_SCHEMA}, but a read-only account is the documented setup"
+              READER_CREATED=0
+              return 0
+          fi
+          validate_password ORACLE_MIGRATION_PASSWORD
+          validate_identifier ORACLE_MIGRATION_USER
+
+          local sql
+          sql="alter session set container = ${ORACLE_SERVICE};
+      prompt -- an ORA-01920 on the next statement is expected when re-running
+      whenever sqlerror continue none
+      create user ${ORACLE_MIGRATION_USER} identified by \"${ORACLE_MIGRATION_PASSWORD}\";
+      whenever sqlerror exit failure
+      alter user ${ORACLE_MIGRATION_USER} identified by \"${ORACLE_MIGRATION_PASSWORD}\" account unlock;
+      grant connect                     to ${ORACLE_MIGRATION_USER};
+      grant create session              to ${ORACLE_MIGRATION_USER};
+      grant select_catalog_role         to ${ORACLE_MIGRATION_USER};
+      grant select any dictionary       to ${ORACLE_MIGRATION_USER};
+      grant select on sys.argument\$     to ${ORACLE_MIGRATION_USER};"
+          run_sql_checked "reader account ${ORACLE_MIGRATION_USER} (CONNECT + dictionary + SYS.ARGUMENT\$)" "$sql"
+          READER_CREATED=1
+      }
+
+      # --------------------------------------------------------------------------
+      # Assert the things the rest of the lab depends on. Anything that fails here
+      # would otherwise surface hours later as an incomprehensible error halfway
+      # through loading ~1,820 objects.
+      # --------------------------------------------------------------------------
+      step_verify_schema() {
+          local sql
+          sql="whenever sqlerror exit failure
+      alter session set container = ${ORACLE_SERVICE};
+      declare
+        type t_list is table of varchar2(40);
+        v_req     t_list := t_list('CREATE SESSION','CREATE TABLE','CREATE VIEW','CREATE SEQUENCE',
+                                   'CREATE PROCEDURE','CREATE TRIGGER','CREATE TYPE','CREATE SYNONYM',
+                                   'CREATE MATERIALIZED VIEW','CREATE JOB','CREATE ANY CONTEXT');
+        v_missing varchar2(4000);
+        v_n       pls_integer;
+      begin
+        for i in 1 .. v_req.count loop
+          select count(*) into v_n
+            from dba_sys_privs
+           where grantee = '${CONTOSO_SCHEMA}' and privilege = v_req(i);
+          if v_n = 0 then v_missing := v_missing || v_req(i) || ', '; end if;
+        end loop;
+        if v_missing is not null then
+          raise_application_error(-20001, '${CONTOSO_SCHEMA} is missing: ' || rtrim(v_missing, ', '));
+        end if;
+
+        select count(*) into v_n
+          from dba_ts_quotas
+         where username = '${CONTOSO_SCHEMA}' and tablespace_name = '${CONTOSO_TABLESPACE}' and max_bytes = -1;
+        if v_n = 0 then
+          raise_application_error(-20002, '${CONTOSO_SCHEMA} has no unlimited quota on ${CONTOSO_TABLESPACE}');
+        end if;
+
+        select count(*) into v_n from all_directories where directory_name = '${ORACLE_UTL_FILE_DIR_NAME}';
+        if v_n = 0 then
+          raise_application_error(-20003, 'directory ${ORACLE_UTL_FILE_DIR_NAME} was not created');
+        end if;
+
+        dbms_output.put_line('verified: privileges, quota and directory for ${CONTOSO_SCHEMA}');
+      end;
+      /"
+          run_sql_checked "${CONTOSO_SCHEMA} passes the privilege, quota and directory checks" "$sql"
+
+          # And prove the account can actually log in over TNS the way every other
+          # script in the lab will, rather than only through 'sqlplus / as sysdba'.
+          # The connect string goes in on stdin, so the password is not in the argv
+          # of the docker process either.
+          local probe
+          probe="$(printf '%s\n' \
+              "set define off" \
+              "set heading off feedback off pagesize 0" \
+              "connect ${CONTOSO_SCHEMA}/\"${CONTOSO_PASSWORD}\"@localhost:1521/${ORACLE_SERVICE}" \
+              "select 'LOGIN_OK='||user||'@'||sys_context('userenv','con_name') from dual;" \
+              "exit" \
+            | docker exec -i "$ORACLE_CONTAINER_NAME" sqlplus -s -L /nolog 2>&1 \
+            | tr -d '\r' | grep -o 'LOGIN_OK=.*' | head -1 || true)"
+          [[ -n "$probe" ]] || die "${CONTOSO_SCHEMA} cannot log in to ${ORACLE_SERVICE} over the listener" \
+              "check the password in .env and that the listener is up: docker exec ${ORACLE_CONTAINER_NAME} lsnrctl status"
+          ok "${probe/LOGIN_OK=/connect test: }"
+      }
+
+      # --------------------------------------------------------------------------
+      # Step 9 - the marker file
+      #
+      # scripts/deploy.sh and the docs both want a way to answer "is the Oracle box
+      # finished yet" from the outside without parsing cloud-init's log. This is it:
+      #
+      #     until ssh azureuser@10.42.1.10 test -f /var/log/contoso-oracle-ready
+      #     do sleep 30; done
+      #
+      # It is deleted at the start of every run and only reappears when everything
+      # below it has succeeded, so a stale marker cannot fool a poller during a
+      # repair. A failed run leaves /var/log/contoso-oracle-failed instead, so a
+      # poller can stop waiting rather than block for an hour.
+      # --------------------------------------------------------------------------
+      write_marker() {
+          local image_id
+          image_id="$(docker image inspect -f '{{.Id}}' "$ORACLE_IMAGE" 2>/dev/null || echo unknown)"
+          cat > "$READY_MARKER" <<MARKER
+      # Contoso Store Oracle source database - ready
+      # Written by ${SCRIPT_NAME} v${SCRIPT_VERSION}. Delete this file to force a poller to wait again.
+      ready_at=$(ts)
+      host=$(hostname -f 2>/dev/null || hostname)
+      container=${ORACLE_CONTAINER_NAME}
+      image=${ORACLE_IMAGE}
+      image_id=${image_id}
+      service=${ORACLE_SERVICE}
+      cdb_service=${ORACLE_CDB_SERVICE}
+      port=${ORACLE_PORT}
+      schema=${CONTOSO_SCHEMA}
+      tablespace=${CONTOSO_TABLESPACE}
+      reader=$( [[ "${READER_CREATED:-0}" == "1" ]] && printf '%s' "$ORACLE_MIGRATION_USER" || printf 'not-created' )
+      directory=${ORACLE_UTL_FILE_DIR_NAME}
+      sessions=${SESSIONS_FINAL:-unknown}
+      processes=${PROCESSES_FINAL:-unknown}
+      data_mount=${ORACLE_DATA_MOUNT}
+      oradata=${ORADATA_DIR}
+      utl_file_host=${UTL_FILE_DIR}
+      seed_host=${SEED_DIR}
+      log=${LOG_FILE}
+      MARKER
+          chmod 0644 "$READY_MARKER"
+          ok "wrote ${READY_MARKER}"
+      }
+
+      on_failure() {
+          local rc=$?
+          [[ $rc -eq 0 ]] && return 0
+          rm -f "$READY_MARKER"
+          {
+              printf '# Contoso Store Oracle source database - FAILED\n'
+              printf 'failed_at=%s\n' "$(ts)"
+              printf 'exit_code=%s\n' "$rc"
+              printf 'log=%s\n'       "$LOG_FILE"
+              printf 'retry=sudo %s\n' "/usr/local/sbin/${SCRIPT_NAME}"
+          } > "$FAILED_MARKER" 2>/dev/null || true
+          chmod 0644 "$FAILED_MARKER" 2>/dev/null || true
+          printf '\n%s%s== FAILED ==%s exit %s, see %s\n' "$C_BOLD" "$C_RED" "$C_RESET" "$rc" "$LOG_FILE" >&2
+          return 0
+      }
+
+      # --------------------------------------------------------------------------
+      main() {
+          require_root
+
+          hdr "Contoso Store Oracle source database"
+          info "${SCRIPT_NAME} v${SCRIPT_VERSION} starting at $(ts)"
+          if [[ -n "$ENV_FILE_LOADED" ]]; then
+              info "configuration from ${ENV_FILE_LOADED} (environment variables override it)"
+          else
+              info "no ${ENV_FILE}; configuration from the environment only"
+          fi
+
+          # Secrets before anything expensive: failing on a missing password after a
+          # 9 GB pull would be rude.
+          resolve_secret ORACLE_SYSTEM_PASSWORD    KV_SECRET_ORACLE_SYSTEM_PASSWORD
+          resolve_secret CONTOSO_PASSWORD          KV_SECRET_CONTOSO_PASSWORD
+          resolve_secret ORACLE_MIGRATION_PASSWORD KV_SECRET_ORACLE_MIGRATION_PASSWORD
+
+          [[ -n "${ORACLE_SYSTEM_PASSWORD:-}" ]] || die \
+              "ORACLE_SYSTEM_PASSWORD is not set" \
+              "export it, put it in ${ENV_FILE}, or set USE_KEYVAULT=1 with AZ_KEYVAULT_NAME and KV_SECRET_ORACLE_SYSTEM_PASSWORD"
+          [[ -n "${CONTOSO_PASSWORD:-}" ]] || die \
+              "CONTOSO_PASSWORD is not set" \
+              "export it, put it in ${ENV_FILE}, or set USE_KEYVAULT=1 with AZ_KEYVAULT_NAME and KV_SECRET_CONTOSO_PASSWORD"
+
+          # A cloud-init that was never templated leaves the literal placeholder
+          # behind. Catch that here rather than creating a schema owner whose
+          # password is the name of the variable it should have come from.
+          #
+          # (The placeholders are double-underscore delimited, which is why '__' is
+          # also on the list of characters a real password may not contain.)
+          case "${ORACLE_SYSTEM_PASSWORD}${CONTOSO_PASSWORD}${ORACLE_MIGRATION_PASSWORD:-}" in
+              *__*) die "a password is still an un-substituted cloud-init placeholder" \
+                        "scripts/deploy.sh renders these into the cloud-init; run it, or set the variables by hand" ;;
+          esac
+
+          validate_password ORACLE_SYSTEM_PASSWORD
+          validate_password CONTOSO_PASSWORD
+          validate_identifier CONTOSO_SCHEMA
+          validate_identifier CONTOSO_TABLESPACE
+          validate_identifier ORACLE_UTL_FILE_DIR_NAME
+          validate_identifier ORACLE_SERVICE
+          case "$ORACLE_PORT" in ''|*[!0-9]*) die "ORACLE_PORT='${ORACLE_PORT}' is not a number" ;; esac
+          case "$ORACLE_MIN_SESSIONS" in ''|*[!0-9]*) die "ORACLE_MIN_SESSIONS='${ORACLE_MIN_SESSIONS}' is not a number" ;; esac
+          case "$ORACLE_PROCESSES" in ''|*[!0-9]*) die "ORACLE_PROCESSES='${ORACLE_PROCESSES}' is not a number" ;; esac
+
+          rm -f "$READY_MARKER" "$FAILED_MARKER"
+
+          step_docker_install
+          step_data_disk
+          step_docker_daemon
+          step_pull_image
+          step_run_container
+          wait_for_database
+          ensure_pdb_open
+          step_sessions
+          step_schema
+          write_marker
+
+          hdr "Done"
+          local addr
+          addr="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+          ok "Oracle ${ORACLE_SERVICE} is open on ${addr:-$(hostname)}:${ORACLE_PORT}"
+          note "schema owner : ${CONTOSO_SCHEMA}"
+          note "reader       : $( [[ "${READER_CREATED:-0}" == "1" ]] && printf '%s' "$ORACLE_MIGRATION_USER" || printf 'not created' )"
+          note "connect      : sqlplus ${CONTOSO_SCHEMA}/<password>@<host>:${ORACLE_PORT}/${ORACLE_SERVICE}"
+          note "next         : load the schema with scripts/seed-oracle.sh"
+          note "marker       : ${READY_MARKER}"
+          note "log          : ${LOG_FILE}"
+      }
+
+      # Log to file and to the console. main runs in a pipeline so tee is guaranteed
+      # to have flushed by the time the script exits; PIPESTATUS carries main's real
+      # exit code back out, which a plain 'exec > >(tee)' would lose.
+      touch "$LOG_FILE" 2>/dev/null || true
+      chmod 0600 "$LOG_FILE" 2>/dev/null || true
+      trap on_failure EXIT
+
+      main "$@" 2>&1 | tee -a "$LOG_FILE"
+      exit "${PIPESTATUS[0]}"
+runcmd:
+  # List form, so nothing is re-interpreted by a shell on the way in.
+  - [ chmod, '0600', /etc/contoso-oracle.env ]
+  - [ chmod, '0755', /usr/local/sbin/install-oracle.sh ]
+  # Everything interesting happens here. The script writes its own transcript
+  # to /var/log/contoso-oracle-setup.log and its own result marker; cloud-init
+  # keeps a copy of stdout in /var/log/cloud-init-output.log.
+  - [ /usr/local/sbin/install-oracle.sh ]
+
+final_message: "contoso-oracle cloud-init finished after $UPTIME seconds. Check /var/log/contoso-oracle-ready and /var/log/contoso-oracle-setup.log."

@@ -1,0 +1,196 @@
+# ---------------------------------------------------------------------------
+# ci.yml - static checks for the Contoso Store migration lab.
+#
+# Runs on every push and pull request. NEEDS NO SECRETS: no Azure credentials,
+# no database, no network beyond the package installs. A fork can run this
+# workflow with no configuration at all, which is the point of a public lab.
+#
+# What it does NOT do: touch Azure, connect to Oracle or PostgreSQL, or spend
+# Foundry tokens. The integration test that stands up a real Oracle lives in
+# .github/workflows/oracle-smoke.yml.
+#
+# Most of the work is delegated to tests/run-tests.sh so that what CI checks
+# and what a contributor checks on their laptop cannot drift apart. The
+# generator determinism job is the exception: it is split out and given its
+# own runner so a drift failure is obvious in the checks list rather than
+# buried in a summary table.
+#
+# See docs/design.md sections 7 and 12, and CONTRIBUTING.md.
+# ---------------------------------------------------------------------------
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch cancels the first. CI here is cheap but
+# not free, and a stale run is worse than no run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # =======================================================================
+  # Everything tests/run-tests.sh knows how to check, in one place.
+  # --strict turns a SKIP into a failure: this runner installs every tool
+  # on purpose, so a skip here would mean a check silently stopped running.
+  # =======================================================================
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # docs/design.md and tools/requirements.txt put the floor at 3.9.
+          # Pin the minor version so a determinism failure is never the
+          # runner image quietly moving underneath us.
+          python-version: '3.12'
+
+      - name: Install shellcheck
+        run: |
+          # ubuntu-latest ships shellcheck, but the version moves with the
+          # image and new releases add findings. Install a pinned one so a
+          # green build stays green until someone changes this line.
+          SC_VERSION=v0.10.0
+          curl -fsSL --retry 3 \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VERSION}/shellcheck-${SC_VERSION}.linux.x86_64.tar.xz" \
+            | tar -xJf - -C /tmp
+          sudo install -m 0755 "/tmp/shellcheck-${SC_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Install Bicep
+        run: |
+          # az is preinstalled on ubuntu-latest; the bicep CLI is not.
+          az bicep install
+          az bicep version
+
+      - name: Run the test harness
+        env:
+          NO_COLOR: '1'
+        run: |
+          chmod +x tests/run-tests.sh
+          tests/run-tests.sh --strict
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-check-logs
+          path: out/logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # =======================================================================
+  # Generator determinism.
+  #
+  # docs/design.md section 7: "Two runs on two machines must produce
+  # byte-identical output - the lab diffs conversion results across runs, so
+  # drift is fatal."
+  #
+  # tests/run-tests.sh already runs this check with two different
+  # PYTHONHASHSEEDs. This job repeats it across two different Python minor
+  # versions, which is the closest a single workflow gets to "two machines"
+  # and catches the drift a single interpreter cannot: dict ordering
+  # guarantees, float repr, and hashlib or random behaviour changes between
+  # releases.
+  # =======================================================================
+  determinism:
+    name: generator determinism (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.12']
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Generate twice and diff
+        env:
+          GEN_SEED: '20260902'
+        run: |
+          set -euo pipefail
+          GEN=tools/generate-objects.py
+          if [[ ! -f "$GEN" ]]; then
+            echo "::error::${GEN} is missing"
+            exit 1
+          fi
+
+          # Probe the generator's flags rather than assuming them. tools/ has
+          # a different author and an unknown-flag error would be a worse
+          # failure than adapting. scripts/seed-oracle.sh does the same.
+          HELP="$(python3 "$GEN" --help 2>&1 || true)"
+          if [[ -z "${HELP//[[:space:]]/}" ]]; then
+            echo "::error::${GEN} exposes no command line yet - nothing to check"
+            exit 1
+          fi
+
+          args_for() {   # args_for <outdir>
+            local out="$1" a=()
+            grep -qe '--seed' <<<"$HELP" && a+=(--seed "${GEN_SEED}")
+            if   grep -qe '--out\b'      <<<"$HELP"; then a+=(--out "$out")
+            elif grep -qe '--output-dir' <<<"$HELP"; then a+=(--output-dir "$out")
+            else
+              echo "::error::${GEN} has no --out flag; cannot compare two runs" >&2
+              return 3
+            fi
+            printf '%s\n' "${a[@]}"
+          }
+
+          mkdir -p /tmp/gen-a /tmp/gen-b
+          mapfile -t A_ARGS < <(args_for /tmp/gen-a)
+          mapfile -t B_ARGS < <(args_for /tmp/gen-b)
+
+          # Deliberately different hash seeds. Identical output under
+          # identical hash seeds would prove almost nothing.
+          PYTHONHASHSEED=0     python3 "$GEN" "${A_ARGS[@]}"
+          PYTHONHASHSEED=99991 python3 "$GEN" "${B_ARGS[@]}"
+
+          COUNT_A=$(find /tmp/gen-a -type f | wc -l)
+          echo "run A produced ${COUNT_A} file(s)"
+          if [[ "$COUNT_A" -eq 0 ]]; then
+            echo "::error::the generator wrote no files"
+            exit 1
+          fi
+
+          if diff -r /tmp/gen-a /tmp/gen-b; then
+            echo "Deterministic: ${COUNT_A} file(s) byte-identical across two runs."
+          else
+            echo "::error::generator output is NOT deterministic - see the diff above"
+            exit 1
+          fi
+
+      - name: Record a checksum of the generated set
+        run: |
+          set -euo pipefail
+          # A stable fingerprint of the whole generated corpus. Comparing this
+          # value between the two matrix jobs, and between commits, is the
+          # cheapest possible drift alarm.
+          find /tmp/gen-a -type f -print0 \
+            | LC_ALL=C sort -z \
+            | xargs -0 cat \
+            | sha256sum \
+            | awk '{print "generated-corpus sha256:", $1}' \
+            | tee -a "$GITHUB_STEP_SUMMARY"

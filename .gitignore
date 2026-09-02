@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# Contoso Store Oracle -> Azure Database for PostgreSQL migration lab
+# This is a PUBLIC repository. Nothing secret may ever be committed.
+# ---------------------------------------------------------------------------
+
+# Local credentials. ALWAYS derived from .env.example, NEVER committed.
+.env
+.env.*
+!.env.example
+
+# Logs from spool files, sqlplus, psql, az cli and the shell scripts
+*.log
+logs/
+
+# Deterministic generator output (tools/generate-objects.py writes here)
+generated/
+
+# Working output: converted DDL, reports, object-count diffs, screenshots
+out/
+
+# macOS finder droppings
+.DS_Store
+
+# Python bytecode from tools/
+__pycache__/
+*.py[cod]
+
+# Terraform / OpenTofu state may embed resource ids and connection strings
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+!*.tfvars.example
+
+# Oracle client / sqlplus artefacts
+*.lst
+*.trc
+afiedt.buf
+
+# Editor and tooling scratch
+.vscode/settings.json
+.idea/
+*.swp
