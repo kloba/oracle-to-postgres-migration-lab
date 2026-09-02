@@ -201,7 +201,10 @@ module network 'modules/network.bicep' = {
   }
 }
 
-module oracleVm 'modules/oracle-vm.bicep' = {
+@description('Deploy the Oracle VM. Set false when the VM already exists: Azure rejects any redeploy that re-specifies linuxConfiguration.ssh.publicKeys on a live VM with "PropertyChangeNotAllowed", even when the key is unchanged, so re-running deploy.sh over an existing lab fails on this module alone. scripts/deploy.sh detects the VM and sets this for you.')
+param deployOracleVm bool = true
+
+module oracleVm 'modules/oracle-vm.bicep' = if (deployOracleVm) {
   name: 'deploy-oracle-vm'
   scope: rg
   params: {
@@ -299,16 +302,16 @@ output resourceGroupName string = rg.name
 output location string = location
 
 @description('Private IPv4 address of the Oracle VM. This is ORACLE_HOST.')
-output oracleVmPrivateIp string = oracleVm.outputs.privateIpAddress
+output oracleVmPrivateIp string = deployOracleVm ? oracleVm.outputs.privateIpAddress : oracleVmPrivateIp
 
 @description('Name of the Oracle VM.')
-output oracleVmName string = oracleVm.outputs.vmName
+output oracleVmName string = deployOracleVm ? oracleVm.outputs.vmName : oracleVmName
 
 @description('Resource ID of the Oracle VM, for az network bastion tunnel --target-resource-id. scripts/connect.sh, scripts/seed-oracle.sh and tests/run-tests.sh all read this; without it they fall back to an extra az vm show round trip that breaks if the resource group or VM name has drifted.')
-output oracleVmId string = oracleVm.outputs.vmId
+output oracleVmId string = deployOracleVm ? oracleVm.outputs.vmId : resourceId(subscription().subscriptionId, resourceGroupName, 'Microsoft.Compute/virtualMachines', oracleVmName)
 
 @description('SSH user name on the Oracle VM.')
-output oracleAdminUsername string = oracleVm.outputs.adminUsername
+output oracleAdminUsername string = deployOracleVm ? oracleVm.outputs.adminUsername : oracleAdminUsername
 
 @description('Fully qualified domain name of the PostgreSQL flexible server. Resolves only from inside the VNet. This is PGHOST.')
 output postgresFqdn string = postgres.outputs.fullyQualifiedDomainName

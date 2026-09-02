@@ -61,7 +61,7 @@ DECLARE
    -- -------------------------------------------------------------------
    k_object_floor   CONSTANT PLS_INTEGER := 1000;   -- .env OBJECT_COUNT_FLOOR
    k_object_target  CONSTANT PLS_INTEGER := 1110;   -- design.md section 8 total
-   k_generated_min  CONSTANT PLS_INTEGER := 760;    -- .env GEN_OBJECT_TARGET
+   k_generated_min  CONSTANT PLS_INTEGER := 792;    -- generate-objects.py GEN_OBJECT_TARGET
    k_max_listed     CONSTANT PLS_INTEGER := 25;     -- cap on detail listings
 
    TYPE t_name_tab IS TABLE OF VARCHAR2(30)  INDEX BY PLS_INTEGER;

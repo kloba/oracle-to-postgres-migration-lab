@@ -3694,8 +3694,36 @@ def summarise(em: Emitter, seed: int, multiplier: float, with_tables: bool,
         print("OK: budgeted output matches GEN_OBJECT_TARGET=%d exactly."
               % GEN_OBJECT_TARGET)
     else:
-        print("NOTE: --count-multiplier is not 1.0, so the section 8 budget check")
-        print("      is skipped. Only a multiplier of 1.0 reproduces the contract.")
+        # This branch used to print a mild "NOTE: ... skipped" that nobody read.
+        # A check that quietly turns itself off is worse than no check: a
+        # --count of 760 against a target of 792 produced 763 objects, missed
+        # four per-type minimums, and still reported success, so the breakage
+        # only surfaced much later in tests/run-tests.sh. Say it loudly, name
+        # the consequence, and print the shortfalls that the assertion would
+        # have caught.
+        print("")
+        print("!" * 74, file=sys.stderr)
+        print("WARNING: the section 8 budget assertion was NOT run.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  --count-multiplier is %.6g, not 1.0, so this run does NOT reproduce"
+              % multiplier, file=sys.stderr)
+        print("  the design contract. Only the generator's own default does.", file=sys.stderr)
+        short = [(t, bud_counts.get(t, 0), b)
+                 for t, b in BUDGET.items() if bud_counts.get(t, 0) < b]
+        if short:
+            print("", file=sys.stderr)
+            print("  Per-type minimums this run is BELOW:", file=sys.stderr)
+            for t, got, want in short:
+                print("    %-14s %4d  (design minimum %d, short by %d)"
+                      % (t, got, want, want - got), file=sys.stderr)
+            print("", file=sys.stderr)
+            print("  A schema built from this output will FAIL tests/verify-schema.sql", file=sys.stderr)
+            print("  assertion A3, even though the seed itself will report success:", file=sys.stderr)
+            print("  99-verify-objects.sql only asserts the %d floor, not the per-type"
+                  % OBJECT_COUNT_FLOOR, file=sys.stderr)
+            print("  budget. Re-run without --count to get the contract corpus.", file=sys.stderr)
+        print("!" * 74, file=sys.stderr)
+        print("")
 
     if HANDWRITTEN_OBJECTS + len(real) < OBJECT_COUNT_FLOOR:
         print("FAIL: projected object count is below the %d floor."

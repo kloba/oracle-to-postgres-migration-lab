@@ -106,6 +106,8 @@ ${C_BOLD}OPTIONS${C_RESET}
 
 ${C_BOLD}EXIT STATUS${C_RESET}
     0   Everything required is in place. Warnings may still have been printed.
+        With --skip-azure or --skip-quota, 0 only covers the checks that ran:
+        the closing line says which, and does not clear you to deploy.
     1   One or more required checks failed. Every failure is listed at the end
         together with the command that fixes it.
     2   The script could not run at all (no .env, bad arguments).
@@ -617,7 +619,41 @@ if [[ "$N_WARN" -gt 0 ]]; then
 fi
 
 if [[ "$N_FAIL" -eq 0 ]]; then
-    printf '%s%spreflight passed.%s %s\n' "$C_BOLD" "$C_GREEN" "$C_RESET" "Safe to run scripts/deploy.sh"
+    # "Safe to run scripts/deploy.sh" is a claim about a script that spends
+    # money, so it may only cover checks that actually ran.
+    #
+    #   --skip-azure  turns off sign-in, subscription, resource providers,
+    #                 region and both quota checks - and, at the top of this
+    #                 script, the AZ_SUBSCRIPTION_ID / AZ_KEYVAULT_NAME /
+    #                 FOUNDRY_* variable checks with them. A .env still holding
+    #                 the all-zeros placeholder subscription therefore reaches
+    #                 this line with zero failures.
+    #   --skip-quota  turns off the vCPU and Foundry TPM lookups, which are
+    #                 exactly the ones that catch a deploy that will fail
+    #                 halfway through on capacity.
+    #
+    # Printing the unqualified pass after either would be vouching for evidence
+    # the run declined to collect. Scope the claim to what was checked.
+    # (--skip-docker needs no branch: it only downgrades local Oracle checks
+    # to warnings, which are printed above, and deploy.sh does not use Docker.)
+    caveat() { printf '  %s%s%s\n' "$C_YELLOW" "$*" "$C_RESET"; }
+
+    if [[ "$SKIP_AZURE" -eq 1 ]]; then
+        printf '%s%spreflight passed (local checks only).%s\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
+        caveat "--skip-azure was given, so sign-in, subscription, resource providers,"
+        caveat "region and quota did NOT run, and AZ_SUBSCRIPTION_ID, AZ_KEYVAULT_NAME,"
+        caveat "FOUNDRY_RESOURCE_NAME and FOUNDRY_MODEL_NAME were never validated."
+        caveat "This says nothing about whether scripts/deploy.sh would succeed -"
+        caveat "re-run without --skip-azure before deploying."
+        printf '  %sYou are good to go for the local Docker path: scripts/seed-oracle.sh --local%s\n' "$C_DIM" "$C_RESET"
+    elif [[ "$SKIP_QUOTA" -eq 1 ]]; then
+        printf '%s%spreflight passed, capacity unverified.%s\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
+        caveat "--skip-quota was given, so the vCPU and Foundry TPM checks did NOT run."
+        caveat "scripts/deploy.sh can still fail part-way through on capacity - re-run"
+        caveat "without --skip-quota to confirm before deploying."
+    else
+        printf '%s%spreflight passed.%s %s\n' "$C_BOLD" "$C_GREEN" "$C_RESET" "Safe to run scripts/deploy.sh"
+    fi
     exit 0
 fi
 

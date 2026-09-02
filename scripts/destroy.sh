@@ -46,7 +46,16 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # --------------------------------------------------------------------------
 ASSUME_YES=0
 NO_WAIT=0
-PURGE=0
+# Purge by default. Key Vault and Cognitive Services accounts are soft-deleted,
+# not deleted, so leaving them behind reserves the names and makes the NEXT
+# deploy.sh fail with "FlagMustBeSetForRestore" / "name already in use" against
+# a resource the reader cannot see in the portal. This was found by actually
+# doing it: destroy, then redeploy, and the Foundry account blocked it.
+#
+# The whole cost story of this lab is "destroy it at night, redeploy tomorrow",
+# so a default that quietly breaks redeploy is the wrong default. --no-purge is
+# there for the rare case where you want the name held.
+PURGE=1
 RG_OVERRIDE=''
 
 usage() {
@@ -62,16 +71,21 @@ ${C_BOLD}OPTIONS${C_RESET}
     --resource-group <name>  Delete this group instead of AZ_RESOURCE_GROUP.
     --no-wait                Start the delete and return immediately. The
                              group still disappears; you just stop watching.
-    --purge                  Also purge the soft-deleted Key Vault and
-                             Microsoft Foundry account afterwards. Do this if
-                             you intend to redeploy with the same names.
+    --no-purge               Leave the soft-deleted Key Vault and Microsoft
+                             Foundry account in place. Only do this if you
+                             want the names held; it makes the next deploy
+                             fail until they are purged or they expire.
+    --purge                  Accepted and ignored. Purging is the default now;
+                             the flag is kept so older instructions still work.
     -h, --help               Show this help and exit.
 
-${C_BOLD}WHY --purge EXISTS${C_RESET}
+${C_BOLD}WHY PURGING IS THE DEFAULT${C_RESET}
     Key Vault and Cognitive Services (Foundry) accounts are ${C_BOLD}soft-deleted${C_RESET},
     not deleted. The names stay reserved for 7-90 days, and the next
-    deploy.sh fails with a confusing "name is already in use" that has no
-    visible resource behind it. --purge clears them properly.
+    deploy.sh fails with a confusing "name is already in use" or
+    "FlagMustBeSetForRestore" that has no visible resource behind it.
+    Since this lab is built to be destroyed nightly and redeployed, that
+    default would break the normal loop. Purging is therefore on by default.
 
 ${C_BOLD}WHAT THIS DOES NOT TOUCH${C_RESET}
     Your local Docker container, ./generated, ./out, or .env. Only Azure.
@@ -87,6 +101,7 @@ while [[ $# -gt 0 ]]; do
         -y|--yes)           ASSUME_YES=1; shift ;;
         --no-wait)          NO_WAIT=1; shift ;;
         --purge)            PURGE=1; shift ;;
+        --no-purge)         PURGE=0; shift ;;
         --resource-group)   RG_OVERRIDE="${2:-}"; [[ -n "$RG_OVERRIDE" ]] || die "--resource-group needs a value"; shift 2 ;;
         --resource-group=*) RG_OVERRIDE="${1#*=}"; shift ;;
         -h|--help)          usage; exit 0 ;;

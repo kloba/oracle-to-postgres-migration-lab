@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Runs, in this order:
 #   1. src/oracle/00-*.sql .. 13-*.sql   the hand-written schema (~350 objects)
-#   2. generated/oracle/*.sql            the object generator's ~760
+#   2. generated/oracle/*.sql            the object generator's ~792
 #   3. generated/oracle/data/*.sql       the row data
 #   4. src/oracle/99-verify-objects.sql  the object-count assertion, always last
 #
@@ -13,8 +13,9 @@ set -euo pipefail
 # first; if generated/oracle/data/ has none, tools/generate-data.py is.
 #
 # TARGETS
-#   --local   the Docker container named by ORACLE_CONTAINER_NAME on
-#             localhost:ORACLE_PORT
+#   --local   the Docker container named by ORACLE_CONTAINER_NAME. sqlplus
+#             runs inside it, so it always reaches the container's own
+#             1521; ORACLE_PORT only describes the host mapping.
 #   --azure   the Oracle VM, reached by SSH over an az network bastion tunnel
 #
 # Passwords are never placed on a command line. SQL*Plus is started with
@@ -89,7 +90,9 @@ ${C_BOLD}USAGE${C_RESET}
 
 ${C_BOLD}TARGET (exactly one is required)${C_RESET}
     --local              The Docker container \$ORACLE_CONTAINER_NAME
-                         (default o2p-oracle) on localhost:\$ORACLE_PORT.
+                         (default o2p-oracle). sqlplus runs inside the
+                         container, so \$ORACLE_PORT is only the host
+                         mapping and need not be 1521.
     --azure              The Oracle VM in Azure, over SSH through an
                          'az network bastion tunnel'. Needs generated/outputs.json
                          from a successful scripts/deploy.sh.
@@ -262,9 +265,26 @@ if [[ "$NO_GENERATE" -eq 0 ]] && ! gen_sql_present; then
     GEN_HELP="$(python3 "$GENERATOR" --help 2>&1 || true)"
     GEN_ARGS=()
     gen_supports '\-\-seed[ =]'  && GEN_ARGS+=(--seed  "${GEN_SEED:-20260902}")
-    # '--count[^-]' matches "--count N" and refuses to match "--count-multiplier".
-    if   gen_supports '\-\-count[^-a-z]';   then GEN_ARGS+=(--count "${GEN_OBJECT_TARGET:-760}")
-    elif gen_supports '\-\-count-multiplier'; then : ;  # default multiplier is the 760 budget
+    # DELIBERATELY NOT passing --count.
+    #
+    # The generator owns its own object budget (GEN_OBJECT_TARGET in
+    # tools/generate-objects.py) and asserts against it. Passing the number in
+    # from .env made it a SECOND source of truth, and the two drifted: the
+    # generator moved to 792 while .env.example still said 760. Because --count
+    # is converted to a multiplier of N/GEN_OBJECT_TARGET, "--count 760" then
+    # scaled the whole corpus by 0.9596 -> 763 objects instead of 792, missing
+    # four per-type minimums, AND the budget assertion silently disabled itself
+    # because the multiplier was no longer 1.0. The seed still printed
+    # "verified" because 99-verify-objects.sql only asserts the 1000 floor, so
+    # the failure only surfaced later in tests/run-tests.sh.
+    #
+    # Letting the generator use its own default is the fix: one source of
+    # truth, and the budget assertion stays armed. Set GEN_OBJECT_COUNT in the
+    # environment only if you deliberately want a non-contract corpus.
+    if [[ -n "${GEN_OBJECT_COUNT:-}" ]] && gen_supports '\-\-count[^-a-z]'; then
+        warn "GEN_OBJECT_COUNT=${GEN_OBJECT_COUNT} overrides the generator's own budget"
+        note "the section 8 budget assertion is skipped for any value but the generator's default"
+        GEN_ARGS+=(--count "$GEN_OBJECT_COUNT")
     fi
     # --out takes the ROOT; the generator appends /oracle itself. Passing
     # GEN_DIR here would nest it a second time as generated/oracle/oracle.
@@ -468,8 +488,14 @@ if [[ "$TARGET" == "local" ]]; then
         "docker start ${CONTAINER}"
     ok "container ${CONTAINER} is running"
 
-    # Inside the container the listener is always on localhost.
+    # sqlplus runs INSIDE the container, so the listener it reaches is the
+    # container's own 1521 — never the host-published port. Using ORACLE_PORT
+    # here made ORACLE_PORT=1523 (with -p 1523:1521, the obvious way to avoid a
+    # clash) fail on the very first file with ORA-12541 "no listener".
+    # ORACLE_PORT still describes the HOST mapping, which is what a reader uses
+    # from their own machine; it is simply not what docker exec sees.
     ORACLE_TARGET_HOST='localhost'
+    ORACLE_TARGET_PORT='1521'
     exec_sqlplus() { docker exec -i "$CONTAINER" sqlplus -S -L /nolog; }
 
 else
@@ -533,7 +559,10 @@ else
        and that the VM is running: az vm get-instance-view -g '${RG}' -n '${VM_NAME}' --query instanceView.statuses"
     ok "SSH to ${SSH_USER}@${VM_NAME} works"
 
+    # Same reasoning as the --local branch: this sqlplus also runs inside the
+    # container (over SSH), so it reaches the container's 1521, not the host's.
     ORACLE_TARGET_HOST='localhost'
+    ORACLE_TARGET_PORT='1521'
     exec_sqlplus() {
         # shellcheck disable=SC2029  # $CONTAINER is meant to expand locally; printf %q quotes it for the remote shell
         ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
@@ -548,6 +577,13 @@ fi
 # to reference credentials without hardcoding them, which the public-repo rule
 # requires: 00-schema-setup.sql can say
 #     CREATE USER &contoso_schema IDENTIFIED BY "&contoso_password";
+#
+# ORACLE_TARGET_HOST / ORACLE_TARGET_PORT are the address as seen from WHERE
+# sqlplus actually runs - inside the container, on both targets - so they are
+# always localhost:1521. They are deliberately NOT ORACLE_HOST/ORACLE_PORT,
+# which describe the host-side publish mapping (docker run -p 1523:1521) and
+# mean nothing to a process inside the container. &oracle_host and &oracle_port
+# hand that same pair to the SQL so the two can never disagree.
 # --------------------------------------------------------------------------
 preamble() {
     local user="$1" pw="$2" as_system="${3:-0}"
@@ -567,12 +603,12 @@ SET LONG 200000
 SET LONGCHUNKSIZE 200000
 SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
 SET SQLBLANKLINES ON
-CONNECT ${user}/"${pw}"@${ORACLE_TARGET_HOST}:${ORACLE_PORT}/${ORACLE_SERVICE}
+CONNECT ${user}/"${pw}"@${ORACLE_TARGET_HOST}:${ORACLE_TARGET_PORT}/${ORACLE_SERVICE}
 DEFINE contoso_schema = "${CONTOSO_SCHEMA}"
 DEFINE contoso_password = "${CONTOSO_PW}"
 DEFINE oracle_service = "${ORACLE_SERVICE}"
 DEFINE oracle_host = "${ORACLE_TARGET_HOST}"
-DEFINE oracle_port = "${ORACLE_PORT}"
+DEFINE oracle_port = "${ORACLE_TARGET_PORT}"
 DEFINE migration_user = "${ORACLE_MIGRATION_USER}"
 DEFINE migration_password = "${READER_PW}"
 DEFINE utl_file_dir_name = "${ORACLE_UTL_FILE_DIR_NAME:-CONTOSO_EXPORT_DIR}"

@@ -359,6 +359,22 @@ add_param namePrefix                    "$(jstr "$PREFIX")"
 add_param oracleVmSize                  "$(jstr "${ORACLE_VM_SIZE:-Standard_D4s_v5}")"
 add_param oracleAdminUsername           "$(jstr "${ORACLE_VM_ADMIN_USER:-azureuser}")"
 add_param oracleSshPublicKey            "$(jstr "$SSH_PUB_KEY")"
+
+# Azure refuses to redeploy a live Linux VM whose template re-specifies
+# linuxConfiguration.ssh.publicKeys — "PropertyChangeNotAllowed" — even when the
+# key is byte-identical to the one already on the VM. So a plain re-run of this
+# script over an existing lab fails on the Oracle VM alone, which is exactly what
+# deploy.sh's own failure message tells you to do ("re-run"). Detect the VM and
+# skip its module; everything else still reconciles normally.
+ORACLE_VM_NAME_GUESS="${PREFIX}-oracle-vm"
+if az vm show -g "$RG" -n "$ORACLE_VM_NAME_GUESS" -o none 2>/dev/null; then
+    warn "Oracle VM ${ORACLE_VM_NAME_GUESS} already exists; skipping its module"
+    note "Azure rejects re-specifying the SSH key on a live VM. To rebuild it,"
+    note "delete the VM first, or run scripts/destroy.sh and deploy fresh."
+    add_param deployOracleVm 'false'
+else
+    add_param deployOracleVm 'true'
+fi
 add_param postgresDatabaseName          "$(jstr "${PGDATABASE:-contoso_store}")"
 add_param postgresScratchDatabaseName   "$(jstr "${SCRATCH_PGDATABASE:-migration_scratch}")"
 add_param postgresAdministratorLogin    "$(jstr "${PGUSER:-o2padmin}")"

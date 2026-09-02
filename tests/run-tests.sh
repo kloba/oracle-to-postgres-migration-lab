@@ -870,6 +870,24 @@ done
 printf '\n  %d passed, %d failed, %d skipped\n' "$N_PASS" "$N_FAIL" "$N_SKIP"
 printf '  logs: %s\n' "${RUN_LOG_DIR#"$REPO_ROOT"/}"
 
+# A test harness that runs nothing and reports success is worse than no harness.
+# `--only 'zzz'` used to print "All checks passed" and exit 0, and CI leans on
+# --only 'verify-schema' / --only 'verify-counts' — so renaming a check would
+# have turned CI green while asserting nothing at all. That is the same
+# fail-open shape this repo warns readers about for plpgsql_check, so it should
+# not exist in the repo's own tooling.
+if [[ "$(( N_PASS + N_FAIL + N_SKIP ))" -eq 0 ]]; then
+    printf '\n%s%sNo checks ran.%s\n' "$C_BOLD" "$C_RED" "$C_RESET"
+    if [[ -n "$ONLY_PATTERN" ]]; then
+        printf 'fix: --only %s matched none of the known checks. They are:\n' "$ONLY_PATTERN"
+        for c in "${CHECKS[@]}"; do printf '       %s\n' "$c"; done
+        printf '     Note --only takes a glob, so use --only '\''verify-*'\'' to match a family.\n\n'
+    else
+        printf 'fix: every check was filtered out. This is a bug in the harness.\n\n'
+    fi
+    exit 2
+fi
+
 if [[ "$N_FAIL" -gt 0 ]]; then
     printf '\n%s%s%d check(s) failed.%s\n\n' "$C_BOLD" "$C_RED" "$N_FAIL" "$C_RESET"
     exit 1
