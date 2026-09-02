@@ -156,6 +156,30 @@ SCALE_FACTORS: "OrderedDict[str, int]" = OrderedDict([
 ])
 
 
+def scale_arg(value: str) -> str:
+    """Accept either a tier name or a bare numeric factor.
+
+    Callers disagree about what --scale means. scripts/seed-oracle.sh and the
+    CI workflows think in numeric factors (0.01 for a smoke run), while this
+    generator thinks in tiers. Rejecting the number is technically correct and
+    practically useless: it turned into a CI failure reading
+        argument --scale: invalid choice: '0.01' (choose from small, medium, large)
+    Accept both and map a number to the nearest tier by factor, so no caller has
+    to know which vocabulary this particular script prefers.
+    """
+    if value in SCALE_FACTORS:
+        return value
+    try:
+        factor = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "expected one of %s, or a number; got %r"
+            % (", ".join(SCALE_FACTORS), value))
+    if factor <= 0:
+        raise argparse.ArgumentTypeError("scale must be greater than zero")
+    return min(SCALE_FACTORS, key=lambda tier: abs(SCALE_FACTORS[tier] - factor))
+
+
 def build_row_plan(scale: str) -> "OrderedDict[str, int]":
     factor = SCALE_FACTORS[scale]
     plan: "OrderedDict[str, int]" = OrderedDict()
@@ -3383,7 +3407,9 @@ def write_output(bodies: "OrderedDict[str, str]", outdir: Path, scale: str,
         text = data_header(filename, titles.get(filename, ""), scale, seed,
                            total_rows) + body.rstrip() + "\n"
         path = data_dir / filename
-        path.write_text(text, encoding="utf-8", newline="\n")
+        # Path.write_text(newline=...) is Python 3.10+; the floor here is 3.9.
+        with path.open("w", encoding="utf-8", newline="\n") as _fh:
+            _fh.write(text)
         written.append(path)
 
     driver = [
@@ -3411,7 +3437,9 @@ def write_output(bodies: "OrderedDict[str, str]", outdir: Path, scale: str,
         driver.append("@@%s" % filename)
     driver += ["", "PROMPT === Contoso seed data: done ===", ""]
     path = data_dir / "00-data-load-all.sql"
-    path.write_text("\n".join(driver), encoding="utf-8", newline="\n")
+    # Path.write_text(newline=...) is Python 3.10+; the floor here is 3.9.
+    with path.open("w", encoding="utf-8", newline="\n") as _fh:
+        _fh.write("\n".join(driver))
     written.insert(0, path)
     return written
 
@@ -3493,8 +3521,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--out", default=os.environ.get("GEN_OUTPUT_DIR", str(repo_root / "generated")),
         help="output root; files land in <out>/oracle/data/ (default: %(default)s)")
     parser.add_argument(
-        "--scale", choices=tuple(SCALE_FACTORS), default="medium",
-        help="small ~55k rows, medium ~2M, large ~10M (default: %(default)s)")
+        "--scale", type=scale_arg, default="medium", metavar="TIER|FACTOR",
+        help="small ~55k rows, medium ~2M, large ~10M. A bare number is also "
+             "accepted and mapped to the nearest tier, so --scale 0.01 works "
+             "the same as --scale small (default: %(default)s)")
     parser.add_argument(
         "--seed", type=int, default=int(os.environ.get("GEN_SEED", DEFAULT_SEED)),
         help="deterministic seed (default: %(default)s)")

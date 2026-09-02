@@ -3399,7 +3399,9 @@ def write_output(em: Emitter, outdir: Path, seed: int, multiplier: float,
             parts.append("")
         text = "\n".join(parts).rstrip() + "\n"
         path = oracle_dir / filename
-        path.write_text(text, encoding="utf-8", newline="\n")
+        # Path.write_text(newline=...) is Python 3.10+; the floor here is 3.9.
+        with path.open("w", encoding="utf-8", newline="\n") as _fh:
+            _fh.write(text)
         written.append(path)
 
     # Driver
@@ -3425,7 +3427,9 @@ def write_output(em: Emitter, outdir: Path, seed: int, multiplier: float,
                "PROMPT === Contoso generated objects: done ===",
                ""]
     path = oracle_dir / "00-gen-load-all.sql"
-    path.write_text("\n".join(driver), encoding="utf-8", newline="\n")
+    # Path.write_text(newline=...) is Python 3.10+; the floor here is 3.9.
+    with path.open("w", encoding="utf-8", newline="\n") as _fh:
+        _fh.write("\n".join(driver))
     written.append(path)
 
     # Verification
@@ -3498,7 +3502,9 @@ def write_output(em: Emitter, outdir: Path, seed: int, multiplier: float,
         "",
     ]
     path = oracle_dir / "99-gen-verify-objects.sql"
-    path.write_text("\n".join(verify), encoding="utf-8", newline="\n")
+    # Path.write_text(newline=...) is Python 3.10+; the floor here is 3.9.
+    with path.open("w", encoding="utf-8", newline="\n") as _fh:
+        _fh.write("\n".join(verify))
     written.append(path)
     return written
 
