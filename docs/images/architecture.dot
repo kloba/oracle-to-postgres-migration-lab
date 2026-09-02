@@ -1,0 +1,172 @@
+// Architecture diagram for the Contoso Store Oracle -> Azure PostgreSQL lab.
+//
+// Rendered to architecture.png by docs/images/render.sh. Edit THIS file, never
+// the .png. Regenerate with:  ./docs/images/render.sh
+//
+// Kept as Graphviz rather than a drawing so the names stay exact: every box
+// here is a real resource name, subnet prefix or extension id that appears in
+// infra/main.bicep and .env.example, and a diagram that drifts from those is
+// worse than no diagram.
+
+digraph contoso_lab {
+  bgcolor    = "white";
+  fontname   = "Helvetica";
+  rankdir    = TB;
+  nodesep    = 0.45;
+  ranksep    = 0.55;
+  compound   = true;
+  pad        = 0.35;
+
+  node [shape=box style="rounded,filled" fontname="Helvetica" fontsize=11
+        color="#8A8886" fillcolor="#FFFFFF" penwidth=1.2 margin="0.20,0.14"];
+  edge [fontname="Helvetica" fontsize=9 color="#605E5C" penwidth=1.1];
+
+  // ---------------------------------------------------------------- AI tier
+  subgraph cluster_ai {
+    label     = "AI services  ·  public endpoints";
+    labeljust = "l";
+    fontsize  = 11;
+    fontcolor = "#4B3F8F";
+    style     = "rounded,filled";
+    fillcolor = "#F3F1FB";
+    color     = "#8B7FD4";
+    penwidth  = 1.4;
+    margin    = 14;
+
+    foundry [fillcolor="#EDE9F9" color="#6B5FC7" label=<
+      <table border="0" cellborder="0" cellspacing="0">
+        <tr><td align="left"><b>Microsoft Foundry</b></td></tr>
+        <tr><td align="left"><font point-size="9">gpt-5.2 · 500k TPM</font></td></tr>
+        <tr><td align="left"><font point-size="9">translates Oracle DDL and PL/SQL</font></td></tr>
+      </table>>];
+
+    copilot [fillcolor="#EDE9F9" color="#6B5FC7" label=<
+      <table border="0" cellborder="0" cellspacing="0">
+        <tr><td align="left"><b>GitHub Copilot</b></td></tr>
+        <tr><td align="left"><font point-size="9">agent mode</font></td></tr>
+        <tr><td align="left"><font point-size="9">works the review-task queue</font></td></tr>
+      </table>>];
+  }
+
+  // ------------------------------------------------------------------- VNet
+  subgraph cluster_vnet {
+    label     = "Azure VNet   o2p-vnet   10.42.0.0/16";
+    labeljust = "l";
+    fontsize  = 12;
+    fontcolor = "#0F5A9C";
+    style     = "rounded,filled";
+    fillcolor = "#F2F8FD";
+    color     = "#0F6CBD";
+    penwidth  = 1.6;
+    margin    = 16;
+
+    // -- source ------------------------------------------------------------
+    subgraph cluster_snet_oracle {
+      label     = "snet-oracle   10.42.1.0/24";
+      labeljust = "l";
+      fontsize  = 10;
+      fontcolor = "#8A5A00";
+      style     = "rounded,filled";
+      fillcolor = "#FDF6EC";
+      color     = "#C77700";
+      margin    = 12;
+
+      oraclevm [fillcolor="#FBEEDA" color="#C77700" label=<
+        <table border="0" cellborder="0" cellspacing="0">
+          <tr><td align="left"><b>o2p-oracle-vm</b></td></tr>
+          <tr><td align="left"><font point-size="9">Ubuntu 22.04 · Standard_D4s_v5</font></td></tr>
+          <tr><td align="left"><font point-size="9">Oracle Database Free 23ai (Docker)</font></td></tr>
+          <tr><td align="left"><font point-size="9">schema CONTOSO · ~1,820 objects</font></td></tr>
+          <tr><td align="left"><font point-size="9" color="#A4262C">no public IP</font></td></tr>
+          <tr><td align="left"><font point-size="9" color="#8A5A00"><b>the simulated on-premises source</b></font></td></tr>
+        </table>>];
+    }
+
+    // -- workstation -------------------------------------------------------
+    subgraph cluster_snet_jump {
+      label     = "snet-jumpbox   10.42.2.0/24";
+      labeljust = "l";
+      fontsize  = 10;
+      fontcolor = "#0F5A9C";
+      style     = "rounded,filled";
+      fillcolor = "#EEF6FC";
+      color     = "#0F6CBD";
+      margin    = 12;
+
+      jumpbox [fillcolor="#DCEDFA" color="#0F6CBD" label=<
+        <table border="0" cellborder="0" cellspacing="0">
+          <tr><td align="left"><b>o2p-jump</b></td></tr>
+          <tr><td align="left"><font point-size="9">Windows Server 2022 x64</font></td></tr>
+          <tr><td align="left"><font point-size="9">VS Code + ms-ossdata.vscode-pgsql</font></td></tr>
+          <tr><td align="left"><font point-size="9">where you drive the conversion</font></td></tr>
+          <tr><td align="left"><font point-size="9" color="#A4262C">no public IP</font></td></tr>
+        </table>>];
+    }
+
+    // -- target ------------------------------------------------------------
+    subgraph cluster_snet_pg {
+      label     = "snet-postgres   10.42.3.0/24   (delegated)";
+      labeljust = "l";
+      fontsize  = 10;
+      fontcolor = "#0E6B47";
+      style     = "rounded,filled";
+      fillcolor = "#EFF8F3";
+      color     = "#107C41";
+      margin    = 12;
+
+      postgres [fillcolor="#D8EEE3" color="#107C41" label=<
+        <table border="0" cellborder="0" cellspacing="0">
+          <tr><td align="left"><b>o2p-pg-&lt;unique&gt;</b></td></tr>
+          <tr><td align="left"><font point-size="9">PostgreSQL 16 flexible server</font></td></tr>
+          <tr><td align="left"><font point-size="9"><b>contoso_store</b> — the migration target</font></td></tr>
+          <tr><td align="left"><font point-size="9"><b>migration_scratch</b> — where the tool</font></td></tr>
+          <tr><td align="left"><font point-size="9">compiles and plpgsql_check runs</font></td></tr>
+          <tr><td align="left"><font point-size="9" color="#A4262C">private access only</font></td></tr>
+        </table>>];
+    }
+
+    // -- edge of the network ----------------------------------------------
+    subgraph cluster_snet_bastion {
+      label     = "AzureBastionSubnet   10.42.4.0/26";
+      labeljust = "l";
+      fontsize  = 10;
+      fontcolor = "#3B3A39";
+      style     = "rounded,filled";
+      fillcolor = "#F5F5F5";
+      color     = "#8A8886";
+      margin    = 12;
+
+      bastion [fillcolor="#EAEAEA" color="#605E5C" label=<
+        <table border="0" cellborder="0" cellspacing="0">
+          <tr><td align="left"><b>o2p-bastion</b></td></tr>
+          <tr><td align="left"><font point-size="9">RDP to the jumpbox · SSH to Oracle</font></td></tr>
+          <tr><td align="left"><font point-size="9">the only way in</font></td></tr>
+        </table>>];
+    }
+
+    nat [fillcolor="#F5F5F5" color="#605E5C" label=<
+      <table border="0" cellborder="0" cellspacing="0">
+        <tr><td align="left"><b>NAT gateway + public IP</b></td></tr>
+        <tr><td align="left"><font point-size="9">the only way out — no VM has a public IP</font></td></tr>
+      </table>>];
+  }
+
+  you [shape=box style="rounded,filled" fillcolor="#FFFFFF" color="#323130" penwidth=1.4 label=<
+    <table border="0" cellborder="0" cellspacing="0">
+      <tr><td align="left"><b>you</b></td></tr>
+      <tr><td align="left"><font point-size="9">browser RDP, or az network bastion tunnel</font></td></tr>
+    </table>>];
+
+  // ------------------------------------------------------------------ flows
+  jumpbox -> oraclevm [label="  reads metadata only\l  never writes\l" color="#C77700" fontcolor="#8A5A00"];
+  jumpbox -> postgres [label="  converted DDL\l  and PL/pgSQL\l" color="#107C41" fontcolor="#0E6B47"];
+  jumpbox -> foundry  [label="  https  " color="#6B5FC7" fontcolor="#4B3F8F" style=dashed];
+  jumpbox -> copilot  [label="  https  " color="#6B5FC7" fontcolor="#4B3F8F" style=dashed];
+
+  bastion -> jumpbox  [style=dotted arrowhead=vee];
+  bastion -> oraclevm [style=dotted arrowhead=vee];
+  you     -> bastion  [arrowhead=vee];
+
+  oraclevm -> nat [style=dotted arrowhead=vee color="#A19F9D"];
+  jumpbox  -> nat [style=dotted arrowhead=vee color="#A19F9D"];
+}

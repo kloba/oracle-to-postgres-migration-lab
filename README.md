@@ -12,6 +12,19 @@ what a human still has to do.
 
 ---
 
+> ### Looking for the official Microsoft training?
+>
+> Microsoft Learn publishes a training module with its own guided lab:
+> **[Convert Oracle schemas to Azure Database for PostgreSQL](https://learn.microsoft.com/en-us/training/modules/convert-oracle-schema-azure-database-postgresql-ai/)**.
+> That is the sanctioned starting point, and it is the right first stop if you are new to the tooling.
+>
+> This repo is a community companion, not a replacement. The difference is the source database: the
+> Learn lab uses a small sample schema, while this one hands the same tooling ~1,820 objects of
+> deliberately hostile PL/SQL and asks what survives. Do the Learn module first, then bring the
+> tooling here when you want to know how it behaves at customer scale.
+
+---
+
 > ### Scope: what this lab does and does not claim
 >
 > **The Microsoft conversion tool converts schema and code. It does not copy a single table row.**
@@ -59,48 +72,9 @@ reachable only through Azure Bastion**. That VM is standing in for the customer'
 Oracle server, which is the entire scenario: migrating from a database on a server you control to a
 managed PostgreSQL service.
 
-```text
-                  ┌───────────────────────────────────────────────────────┐
-                  │  Microsoft Foundry        GitHub Copilot              │
-                  │  gpt-5.2 / gpt-5-mini *   agent mode (review tasks)   │
-                  │  (FOUNDRY_MODEL_NAME)                                 │
-                  └──────────────┬───────────────────┬────────────────────┘
-                                 │ https             │ https
-   ══════════════════════════════╪═══════════════════╪══════════════════════════════
-   Azure VNet  o2p-vnet          │  10.42.0.0/16     │
-                                 │                   │
-   ┌─────────────────────────────┴───────────────────┴─────────────────────────────┐
-   │                                                                               │
-   │   10.42.1.0/24                10.42.2.0/24              10.42.3.0/24          │
-   │  ┌──────────────────┐       ┌──────────────────┐      ┌────────────────────┐  │
-   │  │  o2p-oracle-vm   │       │    o2p-jump      │      │   o2p-pg-<uniq>    │  │
-   │  │  ──────────────  │       │  ──────────────  │      │  ────────────────  │  │
-   │  │  Ubuntu 22.04    │  read │  Windows x64     │ DDL  │  PostgreSQL 16     │  │
-   │  │  Oracle Free     │◀──────│  VS Code +       │─────▶│  flexible server   │  │
-   │  │  23ai (docker)   │ meta  │  ms-ossdata.     │      │                    │  │
-   │  │  schema CONTOSO  │ data  │  vscode-pgsql    │      │  contoso_store     │  │
-   │  │  ~1,820 objects  │       │                  │      │  migration_scratch │  │
-   │  │                  │       │                  │      │                    │  │
-   │  │  NO PUBLIC IP    │       │  NO PUBLIC IP    │      │  private endpoint  │  │
-   │  │  ▲ simulated     │       │                  │      │  no public access  │  │
-   │  │  │ on-premises   │       │                  │      │                    │  │
-   │  └──┼───────────────┘       └────────┬─────────┘      └────────────────────┘  │
-   │     │                                │                                        │
-   │     │        ┌───────────────────────┴──────────────────────────┐             │
-   │     └────────│  10.42.4.0/26  AzureBastionSubnet → o2p-bastion  │             │
-   │              │  SSH to the Oracle VM · RDP to the jumpbox       │             │
-   │              └──────────────────────────┬───────────────────────┘             │
-   │                                         │                                     │
-   │              ┌──────────────────────────┴───────────────────────┐             │
-   │              │  NAT gateway + public IP                         │             │
-   │              │  the only outbound path — no VM has a public IP  │             │
-   │              └──────────────────────────────────────────────────┘             │
-   └───────────────────────────────────────────────────────────────────────────────┘
-                                         │
-                                    ┌────┴─────┐
-                                    │   you    │  browser RDP / az network bastion
-                                    └──────────┘
-```
+![Architecture of the lab: an Oracle VM standing in for on-premises, a Windows jumpbox running VS Code, and an Azure Database for PostgreSQL flexible server, all inside one VNet with no public IPs, reached through Azure Bastion. The jumpbox calls Microsoft Foundry and GitHub Copilot over https.](docs/images/architecture.png)
+
+<sub>Source: [`docs/images/architecture.dot`](docs/images/architecture.dot). Regenerate with `./docs/images/render.sh` — edit the `.dot`, never the `.png`.</sub>
 
 Two things about that diagram are load-bearing:
 
@@ -422,6 +396,7 @@ published material (the Foundry model name and the RBAC role), and the lab recor
 resolving them for you. Check the primary sources before you rely on anything here for a real
 migration:
 
+- [Convert Oracle schemas to Azure Database for PostgreSQL](https://learn.microsoft.com/en-us/training/modules/convert-oracle-schema-azure-database-postgresql-ai/) — the official Microsoft Learn training module, which has its own guided lab. **Start there** if you want the sanctioned walkthrough; this repo is a community companion that gives you a far larger and deliberately nastier schema to point the same tooling at.
 - [Schema conversion overview](https://learn.microsoft.com/en-us/azure/postgresql/migrate/oracle-conversions-schema/schema-conversions-overview)
 - [Oracle migration with the VS Code extension](https://learn.microsoft.com/en-us/azure/postgresql/development/vs-code-extension/oracle-migration)
 
