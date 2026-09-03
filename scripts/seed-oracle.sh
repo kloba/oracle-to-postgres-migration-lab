@@ -705,11 +705,11 @@ else
             installing|ssh-error|'')
                 [[ "$ANNOUNCED" -eq 1 ]] || {
                     info "waiting for Oracle on ${VM_NAME} - cloud-init runs 15-20 min after the VM reports Succeeded"
-                    note "polling for ${ORACLE_READY_MARKER}, giving up after $(( ORACLE_READY_TIMEOUT / 60 ))m (ORACLE_READY_TIMEOUT)"
+                    note "polling for ${ORACLE_READY_MARKER}, giving up after $(fmt_ms $(( ORACLE_READY_TIMEOUT * 1000 ))) (ORACLE_READY_TIMEOUT)"
                     ANNOUNCED=1
                 }
                 [[ "$ELAPSED" -lt "$ORACLE_READY_TIMEOUT" ]] || die \
-                    "Oracle was still not ready on ${VM_NAME} after $(( ORACLE_READY_TIMEOUT / 60 ))m" \
+                    "Oracle was still not ready on ${VM_NAME} after $(fmt_ms $(( ORACLE_READY_TIMEOUT * 1000 )))" \
                     "watch cloud-init finish, or find out why it did not:
        scripts/connect.sh oracle-azure --shell   then:  sudo cloud-init status --long; sudo tail -50 /var/log/contoso-oracle-install.log
        Raise the wait with ORACLE_READY_TIMEOUT=<seconds> once you know it is only slow."

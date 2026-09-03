@@ -231,8 +231,13 @@ tunnel_stragglers() {
 }
 
 cleanup() {
+    # `connect.sh ... | head` breaks stdout. Without this the notice below
+    # takes SIGPIPE and kills the handler before it kills anything, leaking the
+    # tunnel exactly the way the wrapper PID did. Ignoring SIGPIPE turns that
+    # into a write error the handler can shrug off and carry on.
+    trap '' PIPE
     [[ -n "$TUNNEL_PID" ]] || return 0
-    printf '\n  %sclosing Bastion tunnel%s\n' "$C_DIM" "$C_RESET"
+    printf '\n  %sclosing Bastion tunnel%s\n' "$C_DIM" "$C_RESET" 2>/dev/null || true
     if [[ -n "$TUNNEL_PGID" && "$TUNNEL_PGID" != "$SELF_PGID" ]]; then
         kill -- "-${TUNNEL_PGID}" 2>/dev/null || true
     else
@@ -274,8 +279,13 @@ open_tunnel() {
     # own, which is the only handle that survives the non-exec `az` wrapper.
     # See the note above cleanup().
     set -m
+    # </dev/null because the tunnel now lives in a BACKGROUND process group: a
+    # process there that reads the controlling terminal is stopped with
+    # SIGTTIN, and it must never compete for keystrokes with the interactive
+    # SQL*Plus or psql session this tunnel exists to carry.
     az network bastion tunnel --name "$bastion" --resource-group "$rg" \
-        --target-resource-id "$resid" --resource-port "$rport" --port "$lport" >/dev/null 2>&1 &
+        --target-resource-id "$resid" --resource-port "$rport" --port "$lport" \
+        </dev/null >/dev/null 2>&1 &
     TUNNEL_PID=$!
     set +m
     TUNNEL_PORT="$lport"
