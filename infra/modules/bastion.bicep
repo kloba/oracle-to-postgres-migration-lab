@@ -70,25 +70,35 @@ resource bastion 'Microsoft.Network/bastionHosts@2024-05-01' = {
   sku: {
     name: skuName
   }
-  properties: {
-    // Basic SKU rejects scaleUnits, enableTunneling, enableIpConnect,
-    // enableShareableLink and disableCopyPaste. Setting any of them here would
-    // fail the deployment, so the property bag stays minimal on purpose.
-    ipConfigurations: [
-      {
-        name: 'IpConf'
-        properties: {
-          subnet: {
-            id: subnetId
+  properties: union(
+    {
+      ipConfigurations: [
+        {
+          name: 'IpConf'
+          properties: {
+            subnet: {
+              id: subnetId
+            }
+            publicIPAddress: {
+              id: publicIp.id
+            }
+            privateIPAllocationMethod: 'Dynamic'
           }
-          publicIPAddress: {
-            id: publicIp.id
-          }
-          privateIPAllocationMethod: 'Dynamic'
         }
-      }
-    ]
-  }
+      ]
+    },
+    // Basic SKU REJECTS enableTunneling, so it can only be set for Standard --
+    // hence union() rather than a plain property.
+    //
+    // It is not optional for this lab. Standard SKU alone does NOT switch
+    // tunneling on: enableTunneling defaults to false, and without it
+    // `az network bastion tunnel` fails, which takes down scripts/connect.sh
+    // (oracle-azure, postgres, scratch) and scripts/seed-oracle.sh --azure --
+    // i.e. every way of reaching the Oracle VM or the private PostgreSQL
+    // server. A real deployment came up Standard with enableTunneling = None
+    // and the whole Azure path was unusable.
+    skuName == 'Standard' ? { enableTunneling: true } : {}
+  )
 }
 
 @description('Name of the Bastion host.')
