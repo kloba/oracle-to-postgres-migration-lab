@@ -75,7 +75,7 @@ emit DDL in dependency order and fail on it.
 
   Oracle's own `container-registry.oracle.com/database/free:latest` — the `ORACLE_IMAGE` default the
   Azure VM path pulls — works too, but it is a ~9 GB image and needs a one-time
-  `docker login container-registry.oracle.com` after you accept the licence. On that image the
+  no `docker login` — it pulls anonymously, verified on a credential-less Azure VM. On that image the
   password variable is `-e ORACLE_PWD=`, not `-e ORACLE_PASSWORD=`.
 
 **Both paths need:**

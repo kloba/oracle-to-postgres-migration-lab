@@ -317,9 +317,10 @@ what the `oracle-smoke` CI workflow uses.
 **Resolved (2026-09-02):** `.env.example` and `docs/02-seed-oracle.md` now state this plainly. The
 official Oracle image stays the `ORACLE_IMAGE` default for the **Azure VM** path; the **local Docker**
 path (and CI) use `gvenzl/oracle-free:23-slim`, which needs no registry login and starts far faster,
-so it is the documented local default. The official image still works locally after
-`docker login container-registry.oracle.com`. Both are Oracle Free 23ai; the conversion itself has
-still never been run against either (§2.2).
+so it is the documented local default. The official image works locally too, and needs no
+`docker login` — it was pulled anonymously on a credential-less Azure VM (2026-09-03), which
+disproves an earlier claim here that a login was required. Both are Oracle Free 23ai; the
+conversion itself has still never been run against either (§2.2).
 
 ### 3.4 Unused `.env.example` variables — resolved
 
