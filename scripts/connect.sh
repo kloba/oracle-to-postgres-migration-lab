@@ -163,7 +163,15 @@ set -a
 set +a
 
 ORACLE_SERVICE="${ORACLE_SERVICE:-FREEPDB1}"
-ORACLE_PORT="${ORACLE_PORT:-1521}"
+# Every sqlplus in this script runs INSIDE the Oracle container - `docker exec`
+# locally, and `ssh ... docker exec` on the VM - so the listener it reaches is
+# the container's own 1521, never the host-published port. install-oracle.sh
+# and scripts/cloud-init/oracle-vm.yaml both publish `-p "${ORACLE_PORT}:1521"`,
+# so ORACLE_PORT describes the HOST mapping only and is deliberately not read
+# here. seed-oracle.sh hit this for real: ORACLE_PORT=1523 - the obvious way to
+# dodge a clash with a local lab container - failed on the very first file with
+# ORA-12541 "no listener". It carries the same note; do not "fix" this back.
+ORACLE_TARGET_PORT='1521'
 CONTOSO_SCHEMA="${CONTOSO_SCHEMA:-CONTOSO}"
 CONTAINER="${ORACLE_CONTAINER_NAME:-o2p-oracle}"
 PREFIX="${AZ_PREFIX:-o2p}"
@@ -195,12 +203,58 @@ free_port() {
 }
 
 TUNNEL_PID=''
+TUNNEL_PGID=''
+TUNNEL_PORT=''
+SELF_PGID="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+
+# Killing $TUNNEL_PID alone does not close the tunnel. On Homebrew `az` is a
+# bash wrapper that does NOT exec:
+#     AZ_INSTALLER=HOMEBREW .../python -Im azure.cli "$@"
+# so $! is the wrapper's PID, and killing it leaves the python child running -
+# reparented to init, still holding the Bastion session and still bound to the
+# local port. The script printed "closing Bastion tunnel" while closing
+# nothing; free_port then had to walk one port further on every run, and its
+# window is only 60 wide, so connect.sh eventually died with "no free local
+# port". open_tunnel starts the tunnel in its OWN process group so the whole
+# tree can be signalled here. Orphaning changes a process's parent, not its
+# process group, so the pgid stays a reliable handle on the child even after
+# the wrapper is gone.
+tunnel_stragglers() {
+    local pid pgid
+    [[ -n "$TUNNEL_PORT" && -n "$TUNNEL_PGID" && "$TUNNEL_PGID" != "$SELF_PGID" ]] || return 0
+    have lsof || return 0
+    for pid in $(lsof -ti "tcp:${TUNNEL_PORT}" -sTCP:LISTEN 2>/dev/null); do
+        pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+        [[ "$pgid" == "$TUNNEL_PGID" ]] && printf '%s\n' "$pid"
+    done
+    return 0
+}
+
 cleanup() {
-    if [[ -n "$TUNNEL_PID" ]]; then
-        printf '\n  %sclosing Bastion tunnel%s\n' "$C_DIM" "$C_RESET"
+    [[ -n "$TUNNEL_PID" ]] || return 0
+    printf '\n  %sclosing Bastion tunnel%s\n' "$C_DIM" "$C_RESET"
+    if [[ -n "$TUNNEL_PGID" && "$TUNNEL_PGID" != "$SELF_PGID" ]]; then
+        kill -- "-${TUNNEL_PGID}" 2>/dev/null || true
+    else
         kill "$TUNNEL_PID" 2>/dev/null || true
-        wait "$TUNNEL_PID" 2>/dev/null || true
     fi
+    wait "$TUNNEL_PID" 2>/dev/null || true
+
+    # Backstop, and the proof that the tunnel really is shut: only ever kills
+    # PIDs whose process group is the one open_tunnel created, so a port the
+    # user handed us with --port that turned out to belong to someone else is
+    # never touched.
+    local waited=0 pids
+    while [[ "$waited" -lt 5 ]]; do
+        pids="$(tunnel_stragglers)"
+        [[ -n "$pids" ]] || return 0
+        # shellcheck disable=SC2086  # deliberate word splitting: one PID per line
+        kill $pids 2>/dev/null || true
+        sleep 1
+        waited=$(( waited + 1 ))
+    done
+    [[ -z "$(tunnel_stragglers)" ]] || \
+        warn "127.0.0.1:${TUNNEL_PORT} is still held: lsof -nP -iTCP:${TUNNEL_PORT} -sTCP:LISTEN"
 }
 trap cleanup EXIT INT TERM
 
@@ -216,9 +270,16 @@ out() {
 open_tunnel() {
     local bastion="$1" rg="$2" resid="$3" rport="$4" lport="$5" waited=0
     info "Bastion tunnel 127.0.0.1:${lport} -> ${rport}"
+    # `set -m` (job control) puts the background job in a process group of its
+    # own, which is the only handle that survives the non-exec `az` wrapper.
+    # See the note above cleanup().
+    set -m
     az network bastion tunnel --name "$bastion" --resource-group "$rg" \
         --target-resource-id "$resid" --resource-port "$rport" --port "$lport" >/dev/null 2>&1 &
     TUNNEL_PID=$!
+    set +m
+    TUNNEL_PORT="$lport"
+    TUNNEL_PGID="$(ps -o pgid= -p "$TUNNEL_PID" 2>/dev/null | tr -d '[:space:]')"
     until (exec 3<>"/dev/tcp/127.0.0.1/${lport}") 2>/dev/null; do
         { exec 3>&-; } 2>/dev/null || true
         sleep 1
@@ -302,14 +363,14 @@ oracle-local)
     ok "${O_USER}@${ORACLE_SERVICE} in container ${CONTAINER}"
 
     if [[ -n "$SQL_COMMAND" ]]; then
-        { oracle_login_sql localhost "$ORACLE_PORT"
+        { oracle_login_sql localhost "$ORACLE_TARGET_PORT"
           printf 'SET HEADING ON\n%s\nEXIT SUCCESS\n' "$SQL_COMMAND"
         } | docker exec -i -e NLS_LANG=.AL32UTF8 "$CONTAINER" sqlplus -S -L /nolog
     else
         printf '  %stype EXIT to leave%s\n\n' "$C_DIM" "$C_RESET"
         # -t keeps the SQL> prompt interactive; the login script arrives on fd 0
         # first, then the terminal takes over.
-        { oracle_login_sql localhost "$ORACLE_PORT"; cat; } \
+        { oracle_login_sql localhost "$ORACLE_TARGET_PORT"; cat; } \
             | docker exec -i -e NLS_LANG=.AL32UTF8 "$CONTAINER" sqlplus -S -L /nolog
     fi
     ;;
@@ -368,12 +429,12 @@ oracle-azure)
     REMOTE_CMD="docker exec -i -e NLS_LANG=.AL32UTF8 $(printf '%q' "$CONTAINER") sqlplus -S -L /nolog"
     # shellcheck disable=SC2029  # $REMOTE_CMD is deliberately expanded locally; printf %q quoted it above
     if [[ -n "$SQL_COMMAND" ]]; then
-        { oracle_login_sql localhost "$ORACLE_PORT"
+        { oracle_login_sql localhost "$ORACLE_TARGET_PORT"
           printf 'SET HEADING ON\n%s\nEXIT SUCCESS\n' "$SQL_COMMAND"
         } | ssh "${SSH_OPTS[@]}" "${SSH_USER}@127.0.0.1" "$REMOTE_CMD"
     else
         printf '  %stype EXIT to leave%s\n\n' "$C_DIM" "$C_RESET"
-        { oracle_login_sql localhost "$ORACLE_PORT"; cat; } \
+        { oracle_login_sql localhost "$ORACLE_TARGET_PORT"; cat; } \
             | ssh "${SSH_OPTS[@]}" "${SSH_USER}@127.0.0.1" "$REMOTE_CMD"
     fi
     ;;
@@ -383,14 +444,25 @@ postgres|scratch)
     # The target database (contoso_store) server is the anchor. Per task #3 the
     # scratch database (migration_scratch) is a SECOND database on the SAME
     # flexible server - same FQDN, same admin credentials - so scratch inherits
-    # every target value and overrides only the database name. Explicit SCRATCH_*
-    # or PG* env vars still win, and the scratch DB name is read from the
-    # postgresScratchDatabaseName output when present. There is no scratch HOST
-    # output (same server), so the host falls back to the target's FQDN.
+    # every target value and overrides only the database name. There is no
+    # scratch HOST output distinct from the target's, so the host falls back to
+    # the target's FQDN.
+    #
+    # For the HOSTNAME, and only the hostname, outputs.json outranks .env - in
+    # BOTH branches. infra/main.bicep names the server
+    # '${namePrefix}-pg-${uniqueString(...)}', so no hostname a reader writes in
+    # .env before deploying can ever be right; .env.example ships
+    # o2p-pg-target / o2p-pg-scratch placeholders that resolve to NXDOMAIN. The
+    # scratch branch used to read `${SCRATCH_PGHOST:-$(out ...)}`, which let
+    # that placeholder outrank a real deployment: straight after a successful
+    # deploy.sh, `connect.sh postgres` worked and `connect.sh scratch` failed
+    # against a host that has never existed. .env still supplies the host when
+    # there is no outputs.json, which is the case a reader pointing at their own
+    # server actually needs.
     PG_FQDN="$(out postgresFqdn)"; PG_FQDN="${PG_FQDN:-${PGHOST:-}}"
     if [[ "$TARGET" == "scratch" ]]; then
         hdr "scratch PostgreSQL"
-        P_HOST="${SCRATCH_PGHOST:-$(out scratchPostgresFqdn)}"; P_HOST="${P_HOST:-$PG_FQDN}"
+        P_HOST="$(out scratchPostgresFqdn)"; P_HOST="${P_HOST:-${SCRATCH_PGHOST:-$PG_FQDN}}"
         P_PORT="${SCRATCH_PGPORT:-${PGPORT:-5432}}"
         P_DB="${SCRATCH_PGDATABASE:-$(out postgresScratchDatabaseName)}"; P_DB="${P_DB:-migration_scratch}"
         P_USER="${SCRATCH_PGUSER:-${PGUSER:-o2padmin}}"
@@ -424,8 +496,10 @@ postgres|scratch)
     PG_CONNECT_HOST="$P_HOST"
     PG_CONNECT_PORT="$P_PORT"
     SSH_FWD_PID=''
+    SSH_FWD_LOG=''
     fwd_cleanup() {
         if [[ -n "$SSH_FWD_PID" ]]; then kill "$SSH_FWD_PID" 2>/dev/null || true; fi
+        if [[ -n "$SSH_FWD_LOG" ]]; then rm -f "$SSH_FWD_LOG"; fi
         cleanup
     }
 
@@ -456,13 +530,62 @@ postgres|scratch)
         [[ -n "$PG_LPORT" ]] || die "no free local port for the PostgreSQL forward" "pass --port <n>"
 
         trap fwd_cleanup EXIT INT TERM
+
+        # Ask the VM before claiming anything. `ssh -L` binds the LOCAL port
+        # straight away and defers the remote name lookup and connect until a
+        # client actually opens a channel; -o ExitOnForwardFailure=yes covers a
+        # local BIND failure and nothing else. So a /dev/tcp probe of the local
+        # end says only "ssh is listening" - it succeeds happily when the
+        # forward points at a host that does not exist, and the reader is told
+        # the database is reachable one line before psql dies with "server
+        # closed the connection unexpectedly". Verified locally: with the exact
+        # flags below and a bogus remote host, the local bind and the probe both
+        # succeed. A real end-to-end check has to run on the far side of the
+        # Bastion tunnel, so that is where this one runs.
+        info "checking ${P_HOST}:${P_PORT} from ${VM_NAME}"
+        PROBE_RC=0
+        ssh -i "$SSH_KEY" -p "$SSH_LPORT" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR -o ConnectTimeout=15 -o BatchMode=yes \
+            "${SSH_USER}@127.0.0.1" \
+            "bash -s -- $(printf '%q %q' "$P_HOST" "$P_PORT")" <<'PROBE' || PROBE_RC=$?
+host="$1"; port="$2"
+getent hosts "$host" >/dev/null 2>&1 || exit 3
+timeout 10 bash -c "exec 3<>/dev/tcp/${host}/${port}" >/dev/null 2>&1 || exit 4
+exit 0
+PROBE
+        case "$PROBE_RC" in
+            0) ok "${VM_NAME} can reach ${P_HOST}:${P_PORT}" ;;
+            3) die "${VM_NAME} cannot resolve ${P_HOST}" \
+                   "the name is wrong, or the private DNS zone is not linked to the VNet.
+       compare what you are using with what the deployment produced:
+         jq -r '.postgresFqdn, .scratchPostgresFqdn' generated/outputs.json
+       a stale PGHOST / SCRATCH_PGHOST in ${ENV_FILE} is the usual cause -
+       the real server name carries a uniqueString() suffix, so any hostname
+       written before deploying is a guess. More: docs/troubleshooting.md" ;;
+            4) die "${VM_NAME} resolves ${P_HOST} but cannot open port ${P_PORT}" \
+                   "the flexible server's NSG or firewall is blocking the VM's subnet:
+       az postgres flexible-server show --name '${P_HOST%%.*}' --resource-group '${RG}' -o json
+       More: docs/troubleshooting.md" ;;
+            *) die "could not run the reachability check on ${VM_NAME} (ssh exited ${PROBE_RC})" \
+                   "check the Bastion tunnel and the key:
+       ${SCRIPT_NAME} oracle-azure --shell" ;;
+        esac
+
+        # ssh's stderr goes to a file rather than the terminal: at LogLevel=INFO
+        # it is noisy on a good run ("Warning: Permanently added ..."), but it
+        # carries the one line that names the real cause on a bad one -
+        # "channel 2: open failed: administratively prohibited". LogLevel=ERROR
+        # used to swallow that, leaving a bare psql disconnect and a hint that
+        # sent the reader after the password. The log is printed on failure.
+        SSH_FWD_LOG="$(mktemp "${TMPDIR:-/tmp}/o2p-pgfwd.XXXXXX")"
         info "forwarding 127.0.0.1:${PG_LPORT} -> ${P_HOST}:${P_PORT} via ${VM_NAME}"
         ssh -N -L "${PG_LPORT}:${P_HOST}:${P_PORT}" \
             -i "$SSH_KEY" -p "$SSH_LPORT" \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o LogLevel=ERROR -o ConnectTimeout=15 -o ServerAliveInterval=30 \
+            -o LogLevel=INFO -o ConnectTimeout=15 -o ServerAliveInterval=30 \
             -o ExitOnForwardFailure=yes \
-            "${SSH_USER}@127.0.0.1" &
+            "${SSH_USER}@127.0.0.1" 2>"$SSH_FWD_LOG" &
         SSH_FWD_PID=$!
 
         WAITED=0
@@ -477,7 +600,8 @@ postgres|scratch)
                 "check the private DNS zone links the VNet to ${P_HOST} - see docs/troubleshooting.md"
         done
         { exec 3>&-; } 2>/dev/null || true
-        ok "PostgreSQL reachable on 127.0.0.1:${PG_LPORT}"
+        # Only the local bind is proven here; the far end was proven above.
+        ok "forward bound on 127.0.0.1:${PG_LPORT}"
 
         PG_CONNECT_HOST='127.0.0.1'
         PG_CONNECT_PORT="$PG_LPORT"
@@ -514,18 +638,31 @@ postgres|scratch)
     export PGSSLMODE="$P_SSL"
     PSQL_ARGS=(--host "$PG_CONNECT_HOST" --port "$PG_CONNECT_PORT" --username "$P_USER" --dbname "$P_DB")
 
-    if [[ -n "$SQL_COMMAND" ]]; then
-        psql "${PSQL_ARGS[@]}" --command "$SQL_COMMAND"
-    else
-        printf '  %stype \\q to leave%s\n\n' "$C_DIM" "$C_RESET"
-        psql "${PSQL_ARGS[@]}" \
-            || die "psql could not connect to ${P_HOST}" \
-                   "the usual causes:
-       - wrong password: check PGPASSWORD in ${ENV_FILE}
+    # psql's own exit status is preserved - callers script against it.
+    pg_failed() {
+        local rc="$1"
+        if [[ -n "$SSH_FWD_LOG" && -s "$SSH_FWD_LOG" ]]; then
+            printf '\n  %sssh port-forward log:%s\n' "$C_BOLD" "$C_RESET" >&2
+            grep -v 'Permanently added' "$SSH_FWD_LOG" | sed 's/^/    /' >&2 || true
+        fi
+        printf '\n%s%sconnect failed:%s psql exited %s against %s\n' \
+            "$C_BOLD" "$C_RED" "$C_RESET" "$rc" "$P_HOST" >&2
+        printf '%sfix:%s %s\n' "$C_BOLD" "$C_RESET" "the usual causes:
+       - wrong password: check $( [[ "$TARGET" == "scratch" ]] && echo SCRATCH_PGPASSWORD || echo PGPASSWORD ) in ${ENV_FILE}
        - the database does not exist yet: connect to 'postgres' instead
        - with --direct, the server is private-only or your IP is not allowed:
-           drop --direct to tunnel through the Oracle VM instead"
+           drop --direct to tunnel through the Oracle VM instead" >&2
+        exit "$rc"
+    }
+
+    PSQL_RC=0
+    if [[ -n "$SQL_COMMAND" ]]; then
+        psql "${PSQL_ARGS[@]}" --command "$SQL_COMMAND" || PSQL_RC=$?
+    else
+        printf '  %stype \\q to leave%s\n\n' "$C_DIM" "$C_RESET"
+        psql "${PSQL_ARGS[@]}" || PSQL_RC=$?
     fi
+    [[ "$PSQL_RC" -eq 0 ]] || pg_failed "$PSQL_RC"
     ;;
 
 *)

@@ -169,7 +169,10 @@ write_files:
       #       fill the OS disk, and cap the container log.
       #   4.  Pull container-registry.oracle.com/database/free.
       #   5.  Run it as a container with the datafiles bind-mounted from /u01, so the
-      #       container is disposable and the database is not.
+      #       container is disposable and the database is not. On a fresh /u01 the
+      #       mount is first seeded with the prebuilt database the image already
+      #       carries, so the container starts a database rather than spending
+      #       10-20 minutes in DBCA building one the image already had.
       #   6.  Poll until the instance is genuinely OPEN and FREEPDB1 is READ WRITE.
       #       No "sleep 600 and hope".
       #   7.  Raise the "sessions" parameter above 10 - the conversion tool's parallel
@@ -263,9 +266,10 @@ write_files:
                              static, so this can leave sessions below the required
                              value; the script says so and exits non-zero.
           --timeout <sec>    How long to wait for the database to open.
-                             Default ${ORACLE_READY_TIMEOUT:-3600}s. The very first
-                             boot creates the database from scratch and genuinely
-                             does take 10-20 minutes.
+                             Default ${ORACLE_READY_TIMEOUT:-3600}s. A first boot
+                             normally restores the image's prebuilt database and
+                             opens in about a minute; if the image has none, it
+                             falls back to DBCA and genuinely takes 10-20 minutes.
           -h, --help         This text.
 
       ${C_BOLD}CONFIGURATION${C_RESET}
@@ -812,6 +816,90 @@ write_files:
           return 0
       }
 
+      # Has the image already written its "this database is built" checkpoint into
+      # the datafile mount? The image writes ${C_ORADATA}/.<SID>.created only after
+      # createDB.sh has returned successfully, so the absence of that file is the one
+      # reliable signal that DBCA is still running inside the container.
+      #
+      # Read from the host side of the bind mount, because it has to answer while the
+      # container is busy and possibly unresponsive to `docker exec`.
+      oradata_checkpoint_written() {
+          local f
+          for f in "${ORADATA_DIR}"/.*.created; do
+              if [[ -f "$f" ]]; then return 0; fi
+          done
+          return 1
+      }
+
+      # Copy the image's prebuilt database onto the (empty) datafile mount.
+      #
+      # container-registry.oracle.com/database/free ships a COMPLETE, already-created
+      # database in the image at /opt/oracle/oradata: ~4 GB of datafiles under FREE/,
+      # the dbconfig/ tree, the .FREE.created checkpoint and a .prebuiltdb marker.
+      # Bind-mounting an empty host directory over that path hides every one of them.
+      # The image's runOracle.sh then finds no checkpoint, concludes that no database
+      # exists, and runs DBCA to build one from scratch - 10-20 minutes on the VM, for
+      # a database the image already contains.
+      #
+      # Seeding the mount first makes runOracle.sh take its "database already exists"
+      # branch instead: symlink the config files, start the instance, and - because
+      # .prebuiltdb is in the copy - still apply ORACLE_PWD. Startup drops to about a
+      # minute and the whole DBCA window, with the races that live in it, disappears.
+      #
+      # The checkpoint file is copied LAST and after a sync. An interrupted copy
+      # therefore leaves a datafile tree with no checkpoint, which is precisely the
+      # state the image cleans up itself ("Clean up incomplete database" in
+      # runOracle.sh) before falling back to DBCA. A half-seeded mount cannot make the
+      # database unstartable.
+      #
+      # Returns 1, without dying, if the image has no prebuilt database (ORACLE_IMAGE
+      # is configurable, and not every Oracle image is built this way) or if the copy
+      # fails. Both cases fall back to the DBCA path, which is what happens today.
+      seed_oradata_from_image() {
+          [[ -d "$ORADATA_DIR" ]] || return 1
+          [[ -z "$(ls -A "$ORADATA_DIR" 2>/dev/null)" ]] || return 1
+
+          info "seeding ${ORADATA_DIR} from the prebuilt database inside the image"
+          local started=$SECONDS
+          # --user 0:0 so the copy can write the mount whatever the host permissions
+          # are, and so cp -a reproduces the image's oracle:oinstall ownership rather
+          # than the image's default runtime user.
+          if docker run --rm --user 0:0 --entrypoint /bin/bash \
+                  -v "${ORADATA_DIR}:/oradata-seed" \
+                  "$ORACLE_IMAGE" -c '
+                      set -eu
+                      src=/opt/oracle/oradata
+                      dst=/oradata-seed
+                      ck=
+                      for f in "$src"/.*.created; do
+                          if [ -f "$f" ]; then ck=$f; break; fi
+                      done
+                      [ -n "$ck" ] || exit 3
+                      ckname=${ck##*/}
+                      sid=${ckname%.created}; sid=${sid#.}
+                      [ -d "$src/$sid" ] || exit 3
+
+                      find "$src" -mindepth 1 -maxdepth 1 ! -name "$ckname" \
+                           -exec cp -a {} "$dst/" \;
+
+                      # find -exec reports success even when a cp inside it failed, so
+                      # count instead of trusting it. The destination started empty.
+                      [ "$(find "$src" -mindepth 1 ! -name "$ckname" | wc -l)" \
+                        -eq "$(find "$dst" -mindepth 1 | wc -l)" ]
+
+                      sync
+                      cp -a "$ck" "$dst/"
+                  ' >/dev/null 2>&1; then
+              chown -R "${ORACLE_UID}:${ORACLE_GID}" "$ORADATA_DIR" 2>/dev/null || true
+              ok "prebuilt database restored in $(( SECONDS - started ))s ($(du -sh "$ORADATA_DIR" 2>/dev/null | awk '{print $1}'))"
+              return 0
+          fi
+
+          warn "the image has no prebuilt database, or the copy failed"
+          note "falling back to creating the database with DBCA, which takes 10-20 minutes"
+          return 1
+      }
+
       step_run_container() {
           hdr "Container ${ORACLE_CONTAINER_NAME}"
 
@@ -864,6 +952,11 @@ write_files:
               printf 'TZ=UTC\n'
           } > "$envfile"
 
+          # A fresh mount is seeded from the database the image already carries, so
+          # the container starts an existing database instead of building one.
+          local seeded=0
+          if seed_oradata_from_image; then seeded=1; fi
+
           info "creating ${ORACLE_CONTAINER_NAME} from ${ORACLE_IMAGE}"
           # --shm-size: the 64 MB Docker default is far too small for an Oracle SGA
           #   and shows up as a baffling ORA-00845 at startup.
@@ -888,7 +981,12 @@ write_files:
           rm -f "$envfile"
 
           ok "container created, listening on host port ${ORACLE_PORT}"
-          if [[ -z "$(ls -A "$ORADATA_DIR" 2>/dev/null)" ]]; then
+          if [[ "$seeded" == "1" ]]; then
+              note "the datafiles came from the image's prebuilt database, so this is a"
+              note "STARTUP, not a create: expect the database to open in about a minute."
+          elif oradata_checkpoint_written; then
+              note "${ORADATA_DIR} already holds a database; this run STARTS it."
+          else
               note "${ORADATA_DIR} is empty, so this run CREATES the database from scratch:"
               note "expect 10-20 minutes before it opens. Nothing is wrong."
           fi
@@ -1003,6 +1101,25 @@ write_files:
           # Wait for the PDB to appear, and only then try to open it. An ALTER against
           # a non-existent PDB is noise, so it is attempted only once the name shows up
           # in v$pdbs in some non-open state.
+          #
+          # NEVER ALTER THE PDB WHILE DBCA IS STILL RUNNING.
+          #
+          # DBCA creates FREEPDB1 MOUNTED and then opens it itself, and it treats a
+          # failure of its own "alter pluggable database FREEPDB1 open" as a
+          # non-ignorable error that fails the entire database creation. Reproduced
+          # locally against this image with an empty datafile mount: the installer saw
+          # FREEPDB1 MOUNTED at 104s and opened it; seven seconds later DBCA's
+          # plugDatabase step logged
+          #     BasicStep.handleNonIgnorableError: ORA-65019: pluggable database
+          #     FREEPDB1 already open
+          # and the container exited with "Database configuration failed". Nudging the
+          # PDB during the create window turns a slow boot into a broken one.
+          #
+          # The image writes ${C_ORADATA}/.<SID>.created only after createDB.sh
+          # succeeds, so that file is the boundary: before it exists DBCA owns the PDB
+          # and we only watch; after it exists the database is ours to open. On the
+          # genuine "came back MOUNTED after a hard kill" case the checkpoint is
+          # already there from the original create, so the nudge still fires.
           local deadline=$(( SECONDS + ORACLE_READY_TIMEOUT ))
           local last_note=0 elapsed
           info "${ORACLE_SERVICE} is '${mode:-not present}'; waiting for it (DBCA may still be creating it)"
@@ -1024,8 +1141,10 @@ write_files:
                   return 0
               fi
 
-              # Present but not open (MOUNTED, READ ONLY, MIGRATE): nudge it.
-              if [[ -n "$mode" ]]; then
+              # Present, not open (MOUNTED, READ ONLY, MIGRATE) and DBCA has finished:
+              # nudge it. See the comment above for why the checkpoint test is not
+              # optional.
+              if [[ -n "$mode" ]] && oradata_checkpoint_written; then
                   sqlplus_sysdba "alter pluggable database ${ORACLE_SERVICE} open;" >/dev/null 2>&1 || true
               fi
 

@@ -305,14 +305,36 @@ BAS_NAMES="$(printf '%s' "$RES_JSON" | jq -r '.[] | select(.type=="Microsoft.Net
 if [[ -n "$BAS_NAMES" ]]; then
     printf '\n  %sBastion%s\n' "$C_BOLD" "$C_RESET"
     for B in $BAS_NAMES; do
-        B_SKU="$(az network bastion show --resource-group "$RG" --name "$B" --query 'sku.name' -o tsv 2>/dev/null || echo '?')"
-        B_TUN="$(az network bastion show --resource-group "$RG" --name "$B" --query 'enableTunneling' -o tsv 2>/dev/null || echo '?')"
-        printf '    %-30s %-12s tunneling=%s\n' "$B" "$B_SKU" "$B_TUN"
-        if [[ "$B_TUN" != "true" && "$B_TUN" != "?" ]]; then
-            printf '      %snative tunneling is off; connect.sh cannot open a tunnel%s\n' "$C_RED" "$C_RESET"
-            printf '      %saz network bastion update --name %s --resource-group %s --enable-tunneling true%s\n' \
-                "$C_DIM" "$B" "$RG" "$C_RESET"
-        fi
+        # One JSON call rather than two tsv ones, because `-o tsv` cannot
+        # express the difference between `false` and "the property was not in
+        # the response": both arrive as an empty string with exit status 0.
+        # az omits enableTunneling entirely on some CLI/API-version pairs, so
+        # the old `|| echo '?'` fallback never fired for an absent property and
+        # an unreported value was reported to the user as a disabled one.
+        B_JSON="$(az network bastion show --resource-group "$RG" --name "$B" -o json 2>/dev/null || echo '{}')"
+        B_SKU="$(printf '%s' "$B_JSON" | jq -r '.sku.name // "?"')"
+        # tostring, not `// empty`: jq's // operator treats `false` as absent
+        # too, which would reintroduce exactly the conflation being fixed.
+        # Yields the strings "true", "false" or "null".
+        B_TUN="$(printf '%s' "$B_JSON" | jq -r '.enableTunneling | tostring')"
+        case "$B_TUN" in
+            true|True|TRUE)
+                printf '    %-30s %-12s tunneling=true\n' "$B" "$B_SKU"
+                ;;
+            false|False|FALSE)
+                # Only assert the consequence when the value is literally false.
+                printf '    %-30s %-12s tunneling=false\n' "$B" "$B_SKU"
+                printf '      %snative tunneling is off; connect.sh cannot open a tunnel%s\n' "$C_RED" "$C_RESET"
+                printf '      %saz network bastion update --name %s --resource-group %s --enable-tunneling true%s\n' \
+                    "$C_DIM" "$B" "$RG" "$C_RESET"
+                ;;
+            *)
+                printf '    %-30s %-12s tunneling=%s\n' "$B" "$B_SKU" "(not reported)"
+                printf '      %saz did not report enableTunneling for this host. That is CLI and%s\n' "$C_DIM" "$C_RESET"
+                printf '      %sAPI-version dependent and does not mean tunneling is off - it may well%s\n' "$C_DIM" "$C_RESET"
+                printf '      %swork. The real test is:  scripts/connect.sh oracle-azure --tunnel-only%s\n' "$C_DIM" "$C_RESET"
+                ;;
+        esac
     done
     note "Bastion bills per hour whether or not anyone connects - it is the quiet expensive one"
 fi

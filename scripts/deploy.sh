@@ -230,6 +230,37 @@ JUMPBOX_PW="$(kv_or_env       JUMPBOX_ADMIN_PASSWORD    KV_SECRET_JUMPBOX_ADMIN_
 # --------------------------------------------------------------------------
 # cloud-init: template the passwords in, then base64
 # --------------------------------------------------------------------------
+
+# Replace every literal occurrence of $1 in CI_BODY with $2, in place.
+#
+# ${CI_BODY//token/$value} is the obvious way to write this and it is wrong for
+# values we do not control. From bash 5.2 an unescaped '&' in the REPLACEMENT
+# expands to the text the pattern matched, so a password containing '&' - which
+# install-oracle.sh's validate_password() explicitly permits, it rejects only
+# " ' @ / \ and whitespace - is silently replaced by the placeholder itself.
+# The VM then gets ORACLE_SYSTEM_PASSWORD='Ab__ORACLE_SYSTEM_PASSWORD__cd', and
+# install-oracle.sh dies with "a password is still an un-substituted cloud-init
+# placeholder", pointing the operator at a deploy.sh that in fact ran fine.
+#
+# Neither one-line escape hatch is portable: `${v//&/\\&}` is right on 5.2+ and
+# leaves a literal backslash on 5.1 and older, while `${CI_BODY//t/"$v"}` is
+# right on 5.2+ and splices the quotes themselves in on bash 3.2 (which is what
+# /bin/bash still is on macOS, and this script only asks for `env bash`). So
+# splice by hand instead: ${rest%%"$1"*} and ${rest#*"$1"} are prefix/suffix
+# removal against a quoted - therefore literal - pattern, and have no
+# replacement string for any bash to reinterpret. Every version agrees.
+#
+# Still pure bash, so the passwords never touch a temp file, a command line or
+# the environment of a child process.
+ci_sub() {
+    local token="$1" value="$2" out='' rest="$CI_BODY"
+    while [[ "$rest" == *"$token"* ]]; do
+        out+="${rest%%"$token"*}${value}"
+        rest="${rest#*"$token"}"
+    done
+    CI_BODY="${out}${rest}"
+}
+
 hdr "cloud-init"
 CLOUD_INIT=''
 # scripts/cloud-init/oracle-vm.yaml is the real document; the rest are names
@@ -248,19 +279,17 @@ if [[ -z "$CLOUD_INIT" ]]; then
     note "looked for: scripts/cloud-init/oracle-vm.yaml, scripts/cloud-init-oracle.yaml, infra/cloud-init*.yaml"
 else
     CI_BODY="$(cat "$CLOUD_INIT")"
-    # Pure-bash substitution. The passwords never touch a temp file, a command
-    # line, or sed (where '&' and '/' in a password would corrupt the output).
-    CI_BODY="${CI_BODY//__ORACLE_SYSTEM_PASSWORD__/$ORACLE_SYSTEM_PW}"
-    CI_BODY="${CI_BODY//__ORACLE_PASSWORD__/$ORACLE_SYSTEM_PW}"
-    CI_BODY="${CI_BODY//__CONTOSO_PASSWORD__/$CONTOSO_PW}"
-    CI_BODY="${CI_BODY//__ORACLE_MIGRATION_PASSWORD__/$ORACLE_READER_PW}"
-    CI_BODY="${CI_BODY//__ORACLE_IMAGE__/${ORACLE_IMAGE:-container-registry.oracle.com/database/free:latest}}"
-    CI_BODY="${CI_BODY//__ORACLE_CONTAINER_NAME__/${ORACLE_CONTAINER_NAME:-o2p-oracle}}"
-    CI_BODY="${CI_BODY//__ORACLE_SERVICE__/${ORACLE_SERVICE:-FREEPDB1}}"
-    CI_BODY="${CI_BODY//__ORACLE_PORT__/${ORACLE_PORT:-1521}}"
-    CI_BODY="${CI_BODY//__CONTOSO_SCHEMA__/${CONTOSO_SCHEMA:-CONTOSO}}"
-    CI_BODY="${CI_BODY//__ORACLE_MIGRATION_USER__/${ORACLE_MIGRATION_USER:-O2P_READER}}"
-    CI_BODY="${CI_BODY//__SSH_PUBLIC_KEY__/$SSH_PUB_KEY}"
+    ci_sub __ORACLE_SYSTEM_PASSWORD__    "$ORACLE_SYSTEM_PW"
+    ci_sub __ORACLE_PASSWORD__           "$ORACLE_SYSTEM_PW"
+    ci_sub __CONTOSO_PASSWORD__          "$CONTOSO_PW"
+    ci_sub __ORACLE_MIGRATION_PASSWORD__ "$ORACLE_READER_PW"
+    ci_sub __ORACLE_IMAGE__          "${ORACLE_IMAGE:-container-registry.oracle.com/database/free:latest}"
+    ci_sub __ORACLE_CONTAINER_NAME__ "${ORACLE_CONTAINER_NAME:-o2p-oracle}"
+    ci_sub __ORACLE_SERVICE__        "${ORACLE_SERVICE:-FREEPDB1}"
+    ci_sub __ORACLE_PORT__           "${ORACLE_PORT:-1521}"
+    ci_sub __CONTOSO_SCHEMA__        "${CONTOSO_SCHEMA:-CONTOSO}"
+    ci_sub __ORACLE_MIGRATION_USER__ "${ORACLE_MIGRATION_USER:-O2P_READER}"
+    ci_sub __SSH_PUBLIC_KEY__        "$SSH_PUB_KEY"
 
     if printf '%s' "$CI_BODY" | grep -q '__[A-Z_]\{3,\}__'; then
         warn "cloud-init still contains unsubstituted __TOKENS__:"

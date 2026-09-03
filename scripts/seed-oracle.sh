@@ -127,6 +127,10 @@ ${C_BOLD}ORDER${C_RESET}
 ${C_BOLD}ON FAILURE${C_RESET}
     The full SQL*Plus output for every file is kept under \$LOG_DIR
     (default ./out/logs). The failing file's log is named in the error.
+    --azure also keeps the Bastion tunnel's own output there, as
+    bastion-tunnel.log. Read that one first for anything that looks like a
+    connection problem: it is the only place az reports a tunnel that accepts
+    TCP but relays nothing.
 EOF
 }
 
@@ -439,10 +443,32 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 # --------------------------------------------------------------------------
+# Log directory
+#
+# Created BEFORE the target is connected, not after, because the Bastion tunnel
+# needs somewhere to write its own output the moment it starts - and when that
+# tunnel is the thing that is broken, its log is the whole diagnosis. --dry-run
+# has already exited above, so a run that connects to nothing is the only case
+# that can leave an empty directory here.
+# --------------------------------------------------------------------------
+mkdir -p "$LOG_DIR"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_LOG_DIR="${LOG_DIR}/seed-${RUN_ID}"
+mkdir -p "$RUN_LOG_DIR"
+TUNNEL_LOG="${RUN_LOG_DIR}/bastion-tunnel.log"
+
+# --------------------------------------------------------------------------
 # Connect the target
 # --------------------------------------------------------------------------
 TUNNEL_PID=''
+SSH_CONTROL_PATH=''
 cleanup() {
+    # Close the shared SSH master first: it is what holds the tunnel's only TCP
+    # connection open, and `ssh -O exit` is a local unix-socket request, so it
+    # cannot hang on a tunnel that has already stopped relaying.
+    if [[ -n "$SSH_CONTROL_PATH" && -S "$SSH_CONTROL_PATH" ]]; then
+        ssh -O exit -o ControlPath="$SSH_CONTROL_PATH" placeholder >/dev/null 2>&1 || true
+    fi
     if [[ -n "$TUNNEL_PID" ]]; then
         kill "$TUNNEL_PID" 2>/dev/null || true
         wait "$TUNNEL_PID" 2>/dev/null || true
@@ -553,9 +579,19 @@ else
     SSH_HOST='127.0.0.1'
 
     info "opening Bastion tunnel 127.0.0.1:${SSH_PORT} -> ${VM_NAME}:22"
+    # NOT >/dev/null. az's output is the only account anyone gets of why a
+    # tunnel is not working, and the bastion extension makes it precious: it
+    # handles every per-connection failure -- RBAC, wrong endpoint, expired
+    # token -- inside a bare `except Exception` that only calls logger.info
+    # (azext_bastion/tunnel.py, _handle_client). At default verbosity that is
+    # printed nowhere at all, so --verbose is what makes those lines exist.
+    # Discarding the stream left a tunnel whose data plane was dead looking
+    # identical to a healthy one: port listening, process alive, nothing said.
     az network bastion tunnel --name "$BASTION" --resource-group "$RG" \
-        --target-resource-id "$VM_ID" --resource-port 22 --port "$SSH_PORT" >/dev/null 2>&1 &
+        --target-resource-id "$VM_ID" --resource-port 22 --port "$SSH_PORT" \
+        --verbose >"$TUNNEL_LOG" 2>&1 &
     TUNNEL_PID=$!
+    TUNNEL_LOG_REL="${TUNNEL_LOG#"$REPO_ROOT"/}"
 
     WAITED=0
     until (exec 3<>"/dev/tcp/127.0.0.1/${SSH_PORT}") 2>/dev/null; do
@@ -563,23 +599,135 @@ else
         sleep 1
         WAITED=$(( WAITED + 1 ))
         kill -0 "$TUNNEL_PID" 2>/dev/null || die "the Bastion tunnel process exited immediately" \
-            "check the Bastion SKU is Standard and native client support is enabled:
-       az network bastion show --name '${BASTION}' --resource-group '${RG}' --query 'sku.name'"
+            "read ${TUNNEL_LOG_REL} - az says there why. Common cause is the Bastion SKU:
+       az network bastion show --name '${BASTION}' --resource-group '${RG}' --query '{sku:sku.name,tunneling:enableTunneling}'"
         [[ "$WAITED" -lt 45 ]] || die "Bastion tunnel did not open within 45s" \
-            "az network bastion tunnel --name '${BASTION}' --resource-group '${RG}' --target-resource-id '${VM_ID}' --resource-port 22 --port ${SSH_PORT}"
+            "read ${TUNNEL_LOG_REL}, or run it in the foreground:
+       az network bastion tunnel --name '${BASTION}' --resource-group '${RG}' --target-resource-id '${VM_ID}' --resource-port 22 --port ${SSH_PORT}"
     done
     { exec 3>&-; } 2>/dev/null || true
-    ok "tunnel up on 127.0.0.1:${SSH_PORT}"
 
     SSH_OPTS=(-i "$SSH_KEY" -p "$SSH_PORT"
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
               -o LogLevel=ERROR -o ConnectTimeout=15 -o ServerAliveInterval=30)
 
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" true 2>/dev/null \
-        || die "SSH to the Oracle VM failed through the tunnel" \
-               "check the key matches the VM: ssh-keygen -y -f '${SSH_KEY}'
-       and that the VM is running: az vm get-instance-view -g '${RG}' -n '${VM_NAME}' --query instanceView.statuses"
-    ok "SSH to ${SSH_USER}@${VM_NAME} works"
+    # One SSH connection for the whole seed instead of one per file.
+    #
+    # Without multiplexing every file paid a full SSH handshake AND a full
+    # Bastion session setup, because the extension tears the session down the
+    # moment active_connections hits zero. A measured run made 33 handshakes for
+    # 30 files (files + the probe + the sysdba grant + the report); the real
+    # 41-file Azure run spent 1.4-1.8s of pure setup on files that do nothing.
+    # Worse, each one was a fresh chance for the tunnel to blip, and with
+    # CONTINUE_ON_ERROR=0 a single blip discards every file that already worked.
+    #
+    # The socket path has to be short: a unix socket is capped at 104 bytes on
+    # macOS and ssh refuses outright with "ControlPath too long" rather than
+    # degrading. The obvious ControlPath=<run-dir>/.ssh-%C is 125 bytes in this
+    # very repo, because %C alone is 40 hex characters. A fixed name inside the
+    # per-run directory is both unique and short - and TMPDIR catches a checkout
+    # deep enough to blow the limit anyway.
+    SSH_CONTROL_PATH="${RUN_LOG_DIR}/cm"
+    [[ "${#SSH_CONTROL_PATH}" -lt 100 ]] || SSH_CONTROL_PATH="${TMPDIR:-/tmp}/o2p-cm-$$"
+    if [[ "${#SSH_CONTROL_PATH}" -lt 100 ]]; then
+        SSH_OPTS+=(-o ControlMaster=auto -o ControlPath="$SSH_CONTROL_PATH" -o ControlPersist=60)
+    else
+        SSH_CONTROL_PATH=''
+        warn "no SSH multiplexing: every path for the control socket is over 100 bytes"
+        note "each SQL file will pay its own SSH and Bastion handshake; set TMPDIR to something shorter"
+    fi
+
+    # A TCP accept is not proof that the tunnel relays.
+    #
+    # `az network bastion tunnel` binds its local listener before the data plane
+    # is usable, and a tunnel that can never relay - missing RBAC on the target,
+    # wrong endpoint, expired token - still accepts and still keeps its process
+    # alive, so neither /dev/tcp nor `kill -0` can tell the two apart. Probing
+    # with the protocol we actually need collapses "still warming up" and
+    # "permanently broken" into one bounded wait with one honest error.
+    SSH_PROBE_TRIES="${SSH_PROBE_TRIES:-6}"
+    SSH_PROBE_ERR=''
+    SSH_ATTEMPT=1
+    while :; do
+        SSH_PROBE_ERR="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" true 2>&1)" && break
+        [[ "$SSH_ATTEMPT" -lt "$SSH_PROBE_TRIES" ]] || die \
+            "the Bastion tunnel is open on 127.0.0.1:${SSH_PORT} but SSH does not get through it (${SSH_PROBE_TRIES} attempts)" \
+            "read ${TUNNEL_LOG_REL} first - a tunnel that accepts TCP but relays nothing logs the reason
+       there and nowhere else. ssh last said: ${SSH_PROBE_ERR:-nothing}
+       If the tunnel log is clean, check the key matches the VM:
+       ssh-keygen -y -f '${SSH_KEY}'
+       and that the VM is running:
+       az vm get-instance-view -g '${RG}' -n '${VM_NAME}' --query instanceView.statuses"
+        [[ "$SSH_ATTEMPT" -eq 1 ]] && info "tunnel accepted TCP but SSH is not through yet, retrying"
+        SSH_ATTEMPT=$(( SSH_ATTEMPT + 1 ))
+        sleep 5
+    done
+    ok "tunnel up on 127.0.0.1:${SSH_PORT}, SSH to ${SSH_USER}@${VM_NAME} works"
+
+    # Wait for Oracle, exactly as the --local branch waits for the container.
+    #
+    # scripts/install-oracle.sh writes /var/log/contoso-oracle-ready when the
+    # database is genuinely open, and /var/log/contoso-oracle-failed when it has
+    # given up, "so a poller can stop waiting rather than block for an hour"
+    # (install-oracle.sh:52-53). Nothing was that poller. Since cloud-init runs
+    # for a further 15-20 minutes after the VM reports Succeeded, the realistic
+    # first run went straight to `docker exec`, got "Error: No such container:
+    # o2p-oracle", and reported it as `sqlplus exit 1` on file 1 - under a fix
+    # hint that told the reader to go and fix the SQL.
+    ORACLE_READY_MARKER="${ORACLE_READY_MARKER:-/var/log/contoso-oracle-ready}"
+    ORACLE_FAILED_MARKER="${ORACLE_FAILED_MARKER:-/var/log/contoso-oracle-failed}"
+    ORACLE_READY_TIMEOUT="${ORACLE_READY_TIMEOUT:-2400}"
+
+    # One round trip answers both questions: has the installer finished, and is
+    # the container actually up.
+    oracle_vm_state() {
+        # shellcheck disable=SC2029  # the markers and $CONTAINER are meant to expand locally; printf %q quotes them for the remote shell
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+            "if [ -f $(printf '%q' "$ORACLE_FAILED_MARKER") ]; then echo install-failed;
+             elif [ ! -f $(printf '%q' "$ORACLE_READY_MARKER") ]; then echo installing;
+             else docker inspect -f '{{.State.Status}}' $(printf '%q' "$CONTAINER") 2>/dev/null || echo no-container; fi" \
+            2>/dev/null || echo ssh-error
+    }
+
+    READY_T0="$(now_ms)"
+    ANNOUNCED=0
+    LAST_NOTE=0
+    while :; do
+        VM_STATE="$(oracle_vm_state)"
+        VM_STATE="${VM_STATE##*$'\n'}"
+        ELAPSED=$(( ( $(now_ms) - READY_T0 ) / 1000 ))
+        case "$VM_STATE" in
+            running) break ;;
+            install-failed)
+                die "Oracle failed to install on ${VM_NAME} (${ORACLE_FAILED_MARKER} exists)" \
+                    "read the installer's own log on the VM:
+       scripts/connect.sh oracle-azure --shell   then:  sudo cat ${ORACLE_FAILED_MARKER}; sudo tail -100 /var/log/contoso-oracle-install.log" ;;
+            installing|ssh-error|'')
+                [[ "$ANNOUNCED" -eq 1 ]] || {
+                    info "waiting for Oracle on ${VM_NAME} - cloud-init runs 15-20 min after the VM reports Succeeded"
+                    note "polling for ${ORACLE_READY_MARKER}, giving up after $(( ORACLE_READY_TIMEOUT / 60 ))m (ORACLE_READY_TIMEOUT)"
+                    ANNOUNCED=1
+                }
+                [[ "$ELAPSED" -lt "$ORACLE_READY_TIMEOUT" ]] || die \
+                    "Oracle was still not ready on ${VM_NAME} after $(( ORACLE_READY_TIMEOUT / 60 ))m" \
+                    "watch cloud-init finish, or find out why it did not:
+       scripts/connect.sh oracle-azure --shell   then:  sudo cloud-init status --long; sudo tail -50 /var/log/contoso-oracle-install.log
+       Raise the wait with ORACLE_READY_TIMEOUT=<seconds> once you know it is only slow."
+                if [[ $(( ELAPSED - LAST_NOTE )) -ge 60 ]]; then
+                    LAST_NOTE="$ELAPSED"
+                    note "still $( [[ "$VM_STATE" == "ssh-error" ]] && printf 'unreachable' || printf 'installing' ) after $(( ELAPSED / 60 ))m"
+                fi
+                sleep 15 ;;
+            *)
+                # The installer says it finished, so a container that is not
+                # running is a real fault, not something to wait out. Same
+                # message the --local branch gives.
+                die "Oracle finished installing on ${VM_NAME} but container '${CONTAINER}' is '${VM_STATE}', not running" \
+                    "start it on the VM:
+       scripts/connect.sh oracle-azure --shell   then:  docker start ${CONTAINER}; docker logs --tail 50 ${CONTAINER}" ;;
+        esac
+    done
+    ok "Oracle is up on ${VM_NAME} (container ${CONTAINER} running)"
 
     # Same reasoning as the --local branch: this sqlplus also runs inside the
     # container (over SSH), so it reaches the container's 1521, not the host's.
@@ -702,10 +850,34 @@ SYSDBA
 # Harmless SP2- messages that are not failures.
 SP2_IGNORE='SP2-0640|SP2-0641|SP2-0851'
 
-mkdir -p "$LOG_DIR"
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-RUN_LOG_DIR="${LOG_DIR}/seed-${RUN_ID}"
-mkdir -p "$RUN_LOG_DIR"
+# Errors raised by the CONNECT itself, or by SSH before sqlplus ever started.
+CONNECT_ERR='^(ORA-(01017|03113|03114|12154|12170|12500|12514|12518|12520|12528|12537|12541|12547|12560)|ssh:|kex_exchange_identification|client_loop:|Connection (closed|reset|timed out)|Timeout, server)'
+# Everything a run that got no further than the CONNECT can legitimately print.
+# The blank-line alternative MUST stay anchored at both ends: '[[:space:]]*'
+# without the $ matches the empty string at the start of every line, which makes
+# the whole allow-list vacuous and turns the "nothing of ours ran" test below
+# into "always true" -- i.e. it would happily re-run a data file that had
+# already inserted half its rows.
+CONNECT_NOISE='^([[:space:]]*$|ERROR:|ORA-[0-9]+:|SP2-064[01]|Help: https?://|ssh:|kex_exchange_identification|client_loop:|Connection (closed|reset|timed out)|Timeout, server|Warning: Permanently added)'
+
+# retryable_connect_failure <log> <rc> - is it SAFE to run this file again?
+#
+# Only when the file's SQL provably never ran. The preamble puts WHENEVER
+# SQLERROR EXIT FAILURE above CONNECT, so a failed CONNECT takes sqlplus down
+# before the first line of the file, leaving the connect error in the log and
+# nothing else. That is the one situation where a retry cannot do harm: a data
+# file that got halfway through would double-insert its rows on a second pass,
+# so "the log contains no output of our own" is the condition, not the error
+# code. A real Azure run died this way at file 32 of 41 - ORA-01017 on a
+# connection that had just worked 31 times - and threw away every earlier file.
+retryable_connect_failure() {
+    local log="$1" rc="$2"
+    [[ "$rc" -ne 0 ]] || return 1
+    [[ -s "$log" ]] || return 1
+    grep -qE "$CONNECT_ERR" "$log" 2>/dev/null || return 1
+    ! grep -qvE "$CONNECT_NOISE" "$log" 2>/dev/null
+}
+CONNECT_ATTEMPTS="${CONNECT_ATTEMPTS:-3}"
 
 # --------------------------------------------------------------------------
 # Run
@@ -732,8 +904,21 @@ for F in ${FILES[@]+"${FILES[@]}"}; do
 
     T0="$(now_ms)"
     RC=0
-    { preamble "$RUN_USER" "$RUN_PW" "$AS_SYS"; cat "$F"; printf '\nEXIT SUCCESS\n'; } \
-        | exec_sqlplus > "$FLOG" 2>&1 || RC=$?
+    ATTEMPT=1
+    while :; do
+        RC=0
+        { preamble "$RUN_USER" "$RUN_PW" "$AS_SYS"; cat "$F"; printf '\nEXIT SUCCESS\n'; } \
+            | exec_sqlplus > "$FLOG" 2>&1 || RC=$?
+        [[ "$ATTEMPT" -lt "$CONNECT_ATTEMPTS" ]] || break
+        retryable_connect_failure "$FLOG" "$RC" || break
+        printf '%10s  %sretry%s\n' "$(fmt_ms $(( $(now_ms) - T0 )))" "$C_YELLOW" "$C_RESET"
+        printf '       %s%s - nothing ran, attempt %d of %d%s\n' "$C_DIM" \
+            "$(grep -m1 -E "$CONNECT_ERR" "$FLOG" | cut -c1-58)" \
+            "$ATTEMPT" "$CONNECT_ATTEMPTS" "$C_RESET"
+        printf '  %-4s %-44s ' "$IDX" "$(printf '%.44s' "$REL")"
+        ATTEMPT=$(( ATTEMPT + 1 ))
+        sleep $(( ATTEMPT * 3 ))
+    done
     MS=$(( $(now_ms) - T0 ))
 
     # sqlplus exits 0 even when a package body compiles with errors, so the

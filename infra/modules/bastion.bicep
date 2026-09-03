@@ -6,11 +6,13 @@
 // both brokered here, over TLS, from the portal or from
 // `az network bastion rdp|ssh`.
 //
-// Basic SKU is deliberate. It is roughly a third the cost of Standard and does
-// everything this lab needs. What you give up: native client support
-// (--target-resource-id from a local mstsc/ssh), IP-based connection, shareable
-// links, and manual scale units. If you want to RDP from your own machine's
-// client rather than the browser, that needs Standard - set skuName accordingly.
+// Basic is the module default because it is roughly a third the cost, but the
+// lab does not use it: infra/main.bicep passes Standard, because the scripts
+// need native-client tunneling and Basic cannot do it. Treat Basic as viable
+// only if you will connect exclusively from the portal in a browser.
+//
+// Choosing a tunneling-capable SKU is necessary but NOT sufficient --
+// enableTunneling has to be set as well, see the union() below.
 //
 // AzureBastionSubnet must be /26 or larger and must carry that exact name; both
 // are enforced by the platform, not by this file.
@@ -33,7 +35,7 @@ param publicIpName string = '${bastionName}-pip'
 @description('DNS label for the public IP, forming <label>.<region>.cloudapp.azure.com. Must be globally unique within the region.')
 param publicIpDnsLabel string = ''
 
-@description('Bastion SKU. Basic covers browser-based RDP and SSH. Standard adds native client support, IP-based connection and shareable links.')
+@description('Bastion SKU. Basic covers browser-based RDP and SSH from the portal only. Standard adds native-client tunneling (az network bastion tunnel/ssh/rdp --target-resource-id), IP-based connection and shareable links. This lab requires Standard: scripts/connect.sh and scripts/seed-oracle.sh --azure reach the Oracle VM and the private PostgreSQL server exclusively through the tunnel.')
 @allowed([
   'Basic'
   'Standard'
@@ -87,17 +89,24 @@ resource bastion 'Microsoft.Network/bastionHosts@2024-05-01' = {
         }
       ]
     },
-    // Basic SKU REJECTS enableTunneling, so it can only be set for Standard --
-    // hence union() rather than a plain property.
+    // Basic SKU REJECTS enableTunneling and would fail the deployment, so the
+    // property is merged in conditionally rather than written inline.
     //
-    // It is not optional for this lab. Standard SKU alone does NOT switch
-    // tunneling on: enableTunneling defaults to false, and without it
+    // It is not optional for this lab. Picking a tunneling-capable SKU does NOT
+    // switch tunneling on: enableTunneling defaults to false, and without it
     // `az network bastion tunnel` fails, which takes down scripts/connect.sh
     // (oracle-azure, postgres, scratch) and scripts/seed-oracle.sh --azure --
     // i.e. every way of reaching the Oracle VM or the private PostgreSQL
     // server. A real deployment came up Standard with enableTunneling = None
     // and the whole Azure path was unusable.
-    skuName == 'Standard' ? { enableTunneling: true } : {}
+    //
+    // The test is "not Basic" rather than "is Standard" because Basic being
+    // rejected is the actual platform constraint. The az bastion extension
+    // gates tunneling on Standard OR Premium
+    // (azext_bastion/custom.py:383-388, _is_sku_standard_or_higher), so an
+    // is-Standard test would silently omit the property if Premium were ever
+    // added to @allowed above, reintroducing this exact bug.
+    skuName == 'Basic' ? {} : { enableTunneling: true }
   )
 }
 
