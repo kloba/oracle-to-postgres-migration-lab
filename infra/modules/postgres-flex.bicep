@@ -23,13 +23,32 @@
 //                                  skips its deeper validation with no error and
 //                                  no warning, and you get a clean-looking report
 //                                  that was never actually checked.
-//   2. shared_preload_libraries    static. Triggers the restart.
+//   2. shared_preload_libraries    static. Does NOT restart the server, see below.
 //   3. pg_stat_statements.track    only exists as a GUC once the library has
-//   4. pg_partman_bgw.dbname       actually been loaded, i.e. after (2) restarts.
+//   4. pg_partman_bgw.dbname       actually been loaded, i.e. after a restart.
 //   5. the contoso_store database  created last, so it is not racing a restart.
 //
 // Reversing 1 and 2, or dropping the dependsOn, produces a deployment that
 // succeeds perhaps four times in five. That is the worst possible failure mode.
+//
+// THE RESTART IS NOT AUTOMATIC, AND ARM CANNOT DO IT.
+//
+// An earlier version of this comment claimed step 2 "triggers the restart". It
+// does not. Microsoft's own parameter reference is explicit: a static parameter
+// "Requires a server restart to make the change effective", and the
+// configuration resource then reports isConfigPendingRestart = true until
+// somebody actually restarts the server.
+//
+// That matters more here than it would anywhere else. Writing
+// shared_preload_libraries makes plpgsql_check *configured* but not *loaded*,
+// and plpgsql_check is fail-open: the conversion tool skips its deeper
+// validation with no error and nothing in the report to say so. So a lab that
+// stopped here would ship the exact trap it exists to teach, and a reader
+// checking azure.extensions would get a clean answer while the library was not
+// in memory.
+//
+// There is no ARM verb for "restart", so scripts/deploy.sh performs it after
+// the deployment and scripts/status.sh asserts isConfigPendingRestart is false.
 // -----------------------------------------------------------------------------
 
 targetScope = 'resourceGroup'

@@ -592,6 +592,42 @@ jq -r 'to_entries[] | "\(.key)\t\(.value|tostring)"' "$OUTPUTS_JSON" 2>/dev/null
 | while IFS=$'\t' read -r K V; do printf '  %-30s %s\n' "$K" "$V"; done
 printf '  %-30s %s\n' "sshPrivateKey" "${SSH_KEY#"$REPO_ROOT"/}"
 
+# --------------------------------------------------------------------------
+# Apply the pending static-parameter restart
+#
+# shared_preload_libraries is a STATIC parameter: Microsoft's reference says a
+# static parameter "Requires a server restart to make the change effective",
+# and the configuration then reports isConfigPendingRestart = true. ARM has no
+# restart verb, so the template cannot finish the job it started.
+#
+# Skipping this is not cosmetic. It leaves plpgsql_check configured but NOT
+# loaded, and plpgsql_check is fail-open -- the conversion tool then skips its
+# deeper validation silently, and the report looks clean because nothing
+# checked it. A reader inspecting azure.extensions would see all four
+# extensions present and conclude they were fine.
+# --------------------------------------------------------------------------
+PG_SERVER="$(out postgresServerName 2>/dev/null || true)"
+if [[ -n "$PG_SERVER" ]]; then
+    hdr "Applying the static-parameter restart"
+    PENDING="$(az postgres flexible-server parameter show \
+                 --resource-group "$RG" --server-name "$PG_SERVER" \
+                 --name shared_preload_libraries \
+                 --query isConfigPendingRestart -o tsv 2>/dev/null || true)"
+    if [[ "$PENDING" == "true" || "$PENDING" == "True" ]]; then
+        info "shared_preload_libraries is pending a restart; restarting ${PG_SERVER}"
+        note "without this plpgsql_check is configured but not loaded, and it fails OPEN"
+        if az postgres flexible-server restart --resource-group "$RG" \
+             --name "$PG_SERVER" -o none 2>/dev/null; then
+            ok "restarted; shared_preload_libraries is now in effect"
+        else
+            warn "restart failed - run it yourself before the first conversion:"
+            note "az postgres flexible-server restart -g ${RG} -n ${PG_SERVER}"
+        fi
+    elif [[ -n "$PENDING" ]]; then
+        ok "no restart pending; shared_preload_libraries is already in effect"
+    fi
+fi
+
 printf '\n%s%sDeployment succeeded.%s Written to %s\n' "$C_BOLD" "$C_GREEN" "$C_RESET" "${OUTPUTS_JSON#"$REPO_ROOT"/}"
 cat <<EOF
 

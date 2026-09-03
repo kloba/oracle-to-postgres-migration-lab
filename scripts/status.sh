@@ -280,6 +280,25 @@ if [[ -n "$PG_NAMES" ]]; then
                 printf '      %sazure.extensions covers the four the lab needs%s\n' "$C_DIM" "$C_RESET"
             fi
         fi
+
+        # Allowlisted is not the same as LOADED. shared_preload_libraries is a
+        # static parameter, so writing it leaves isConfigPendingRestart = true
+        # until the server is restarted -- and ARM has no restart verb, so a
+        # deployment alone never clears it. Until then plpgsql_check is
+        # configured but not in memory, and because it fails OPEN the converter
+        # skips its deeper validation with nothing in the report to say so.
+        # Checking only azure.extensions would report all-clear on exactly that.
+        PENDING="$(az postgres flexible-server parameter show --resource-group "$RG" \
+                     --server-name "$PG" --name shared_preload_libraries \
+                     --query isConfigPendingRestart -o tsv 2>/dev/null || true)"
+        if [[ "$PENDING" == "true" || "$PENDING" == "True" ]]; then
+            printf '      %sshared_preload_libraries is PENDING RESTART - not yet loaded%s\n' "$C_RED" "$C_RESET"
+            printf '      %splpgsql_check is allowlisted but not in memory, and it fails OPEN.%s\n' "$C_DIM" "$C_RESET"
+            printf '      %sfix: az postgres flexible-server restart -g %s -n %s%s\n' "$C_DIM" "$RG" "$PG" "$C_RESET"
+            PREREQ_FAIL=1
+        elif [[ -n "$PENDING" ]]; then
+            printf '      %sshared_preload_libraries is loaded (no restart pending)%s\n' "$C_DIM" "$C_RESET"
+        fi
     done
     note "a stopped flexible server still bills for storage, and auto-restarts after 7 days"
 fi
