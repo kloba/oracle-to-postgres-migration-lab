@@ -637,5 +637,22 @@ cat <<EOF
     scripts/connect.sh oracle-azure    a SQL*Plus session through the Bastion tunnel
     scripts/connect.sh postgres        psql against the target flexible server
 
+  ${C_BOLD}Two manual steps this template deliberately does NOT do${C_RESET}
+    The deployment is finished, but you cannot convert anything yet.
+
+    1. Grant yourself the Foundry data-plane role. The account and model exist;
+       nobody has access to them. The role is named differently depending on
+       your tenant, so grant both and let one fail:
+         FOUNDRY_ID=\$(jq -r .foundryAccountId generated/outputs.json)
+         MY_ID=\$(az ad signed-in-user show --query id -o tsv)
+         az role assignment create --assignee "\$MY_ID" --role "Foundry User" --scope "\$FOUNDRY_ID"
+         az role assignment create --assignee "\$MY_ID" --role "Cognitive Services OpenAI User" --scope "\$FOUNDRY_ID"
+       See docs/03-run-ai-migration.md for why there are two names.
+
+    2. RDP to the jumpbox through Bastion and install VS Code, the PostgreSQL
+       extension and GitHub Copilot. The jumpbox is a bare Windows Server 2022
+       box on purpose - both sign-ins are interactive, so it cannot be
+       provisioned unattended. See docs/01-deploy-infrastructure.md.
+
   ${C_BOLD}${C_YELLOW}When you are done for the day: scripts/destroy.sh${C_RESET}
 EOF

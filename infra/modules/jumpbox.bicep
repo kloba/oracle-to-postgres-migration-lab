@@ -1,9 +1,27 @@
 // -----------------------------------------------------------------------------
 // jumpbox.bicep
 //
-// Windows Server 2022 VM. This is where the reader actually sits: VS Code, the
-// PostgreSQL extension (ms-ossdata.vscode-pgsql), GitHub Copilot, and the Oracle
-// client all live here.
+// Windows Server 2022 VM. This is where the reader sits to drive the conversion:
+// VS Code, the PostgreSQL extension (ms-ossdata.vscode-pgsql), GitHub Copilot
+// and the Oracle client all belong on this box.
+//
+// THIS MODULE DOES NOT INSTALL ANY OF THEM. It creates a NIC and a bare VM, and
+// nothing else -- no CustomScript extension, no DSC, no winget bootstrap. An
+// earlier version of this header said the software "all live here", which read
+// as a promise the template does not keep: you RDP in and find a clean Windows
+// Server 2022 desktop.
+//
+// That is deliberate, not an oversight. The extension needs an interactive sign
+// in to both Foundry and GitHub Copilot, so the box cannot be brought to a
+// ready state unattended anyway, and a half-provisioned VM is harder to reason
+// about than an obviously empty one. The manual steps are written up in
+// docs/01-deploy-infrastructure.md ("Sign in as o2padmin ... Install VS Code")
+// and docs/03-run-ai-migration.md.
+//
+// Also note the template grants NOBODY access to the Foundry model. The account
+// and deployment are created, but the data-plane role assignment is a manual
+// step -- see docs/01-deploy-infrastructure.md and docs/03-run-ai-migration.md,
+// which cover the Foundry User vs Cognitive Services OpenAI User ambiguity.
 //
 // Why Windows, and why a VM at all: the extension's thick client is documented
 // as Windows and Linux x64 only. ARM64 is not supported on either, so Apple
