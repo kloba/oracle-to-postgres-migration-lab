@@ -833,17 +833,65 @@ ensure_pdb_open() {
     mode="$(pdb_open_mode)"
     if [[ "$mode" == "READ WRITE" ]]; then
         ok "${ORACLE_SERVICE} is READ WRITE"
-    else
-        info "${ORACLE_SERVICE} is '${mode:-not present}'; opening it"
-        sqlplus_sysdba "whenever sqlerror exit failure
-alter pluggable database ${ORACLE_SERVICE} open;" >/dev/null
-        mode="$(pdb_open_mode)"
-        [[ "$mode" == "READ WRITE" ]] \
-            || die "${ORACLE_SERVICE} is '${mode:-not present}' and would not open" \
-                   "docker logs ${ORACLE_CONTAINER_NAME}"
-        ok "${ORACLE_SERVICE} opened"
+        sqlplus_sysdba "alter pluggable database ${ORACLE_SERVICE} save state;" >/dev/null || true
+        return 0
     fi
-    sqlplus_sysdba "alter pluggable database ${ORACLE_SERVICE} save state;" >/dev/null || true
+
+    # POLL. Do not check once and give up.
+    #
+    # wait_for_database() returns as soon as v$instance.status = 'OPEN', but on a
+    # FIRST boot that is the CDB opening while DBCA is still creating the
+    # database — observed on a real VM at DBCA's own "30% complete" mark, a full
+    # 30 seconds before the instance reported OPEN. FREEPDB1 does not exist yet
+    # at that point.
+    #
+    # The original code did one check, one ALTER, one re-check, then died. The
+    # ALTER cannot succeed against a PDB that has not been created, so the whole
+    # Azure path failed on every first boot with:
+    #     fatal: FREEPDB1 is 'not present' and would not open
+    # and the 3600s ORACLE_READY_TIMEOUT never applied, because nothing looped.
+    #
+    # Wait for the PDB to appear, and only then try to open it. An ALTER against
+    # a non-existent PDB is noise, so it is attempted only once the name shows up
+    # in v$pdbs in some non-open state.
+    local deadline=$(( SECONDS + ORACLE_READY_TIMEOUT ))
+    local last_note=0 elapsed
+    info "${ORACLE_SERVICE} is '${mode:-not present}'; waiting for it (DBCA may still be creating it)"
+
+    while [[ $SECONDS -lt $deadline ]]; do
+        elapsed=$(( SECONDS ))
+
+        if ! container_running; then
+            printf '\n'
+            docker logs --tail 40 "$ORACLE_CONTAINER_NAME" 2>&1 | sed 's/^/         /' || true
+            die "container ${ORACLE_CONTAINER_NAME} exited while waiting for ${ORACLE_SERVICE}" \
+                "the last 40 log lines are above"
+        fi
+
+        mode="$(pdb_open_mode)"
+        if [[ "$mode" == "READ WRITE" ]]; then
+            ok "${ORACLE_SERVICE} is READ WRITE after ${elapsed}s"
+            sqlplus_sysdba "alter pluggable database ${ORACLE_SERVICE} save state;" >/dev/null || true
+            return 0
+        fi
+
+        # Present but not open (MOUNTED, READ ONLY, MIGRATE): nudge it.
+        if [[ -n "$mode" ]]; then
+            sqlplus_sysdba "alter pluggable database ${ORACLE_SERVICE} open;" >/dev/null 2>&1 || true
+        fi
+
+        if [[ $(( elapsed - last_note )) -ge 120 ]]; then
+            info "still waiting for ${ORACLE_SERVICE} (${elapsed}s elapsed, currently '${mode:-not present}')"
+            docker logs --tail 1 "$ORACLE_CONTAINER_NAME" 2>&1 | sed 's/^/         /' || true
+            last_note=$elapsed
+        fi
+        sleep "$ORACLE_POLL_INTERVAL"
+    done
+
+    printf '\n'
+    docker logs --tail 40 "$ORACLE_CONTAINER_NAME" 2>&1 | sed 's/^/         /' || true
+    die "${ORACLE_SERVICE} was still '${mode:-not present}' after ${ORACLE_READY_TIMEOUT}s" \
+        "the last 40 log lines are above; re-run with --timeout 7200 if the disk is just slow"
 }
 
 # run_sql_checked <label> <sql-text>

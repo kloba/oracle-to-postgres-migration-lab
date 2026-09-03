@@ -205,7 +205,7 @@ while IFS= read -r f; do [[ -n "$f" ]] && BICEP_FILES+=("$f");      done < <(fin
 while IFS= read -r f; do [[ -n "$f" ]] && BICEPPARAM_FILES+=("$f"); done < <(find_repo_files -name '*.bicepparam')
 
 CHECKS=(bash-syntax shellcheck exec-bits bicep-build python-compile
-        generator-determinism markdown-links secret-scan)
+        generator-determinism cloud-init-sync markdown-links secret-scan)
 [[ -n "$TARGET" ]] && CHECKS+=(verify-schema verify-counts)
 
 if [[ "$LIST_ONLY" -eq 1 ]]; then
@@ -457,6 +457,29 @@ fi
 # that needs the internet is a test that fails on a train, and docs/design.md
 # section 11 deliberately names pages that 301-redirect.
 # --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# cloud-init-sync
+#
+# scripts/cloud-init/oracle-vm.yaml embeds a copy of scripts/install-oracle.sh,
+# because the VM has no access to this repository at first boot. A hand-kept
+# "byte-identical copy" is a promise nobody can keep: it had already drifted by
+# 58 lines, so a real deployment ran a version of the installer that was fixed
+# in the repo weeks earlier. Nothing caught it because nothing compared them.
+#
+# Re-sync with:  python3 tools/sync-cloud-init.py
+# ---------------------------------------------------------------------------
+if selected cloud-init-sync; then
+    T0="$(now_ms)"; LOG="${RUN_LOG_DIR}/cloud-init-sync.log"
+    if python3 "${REPO_ROOT}/tools/sync-cloud-init.py" --check > "$LOG" 2>&1; then
+        MS=$(( $(now_ms) - T0 ))
+        record cloud-init-sync PASS "embedded installer matches scripts/install-oracle.sh" "$MS"
+    else
+        MS=$(( $(now_ms) - T0 ))
+        record cloud-init-sync FAIL "embedded installer has drifted from scripts/install-oracle.sh" "$MS"
+        show_log "$LOG"
+    fi
+fi
+
 if selected markdown-links; then
     T0="$(now_ms)"; LOG="${RUN_LOG_DIR}/markdown-links.log"
     if [[ "${#MD_FILES[@]}" -eq 0 ]]; then

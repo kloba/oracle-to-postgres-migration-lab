@@ -405,7 +405,9 @@ write_files:
       export DEBIAN_FRONTEND=noninteractive
       # Azure's Ubuntu images run unattended-upgrades at boot, which holds the dpkg
       # lock for minutes. Without this every apt-get in a cloud-init is a coin toss.
-      APT_OPTS="-o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef"
+      # An array (not a string) so the -o options word-split explicitly and safely,
+      # rather than relying on unquoted IFS splitting that shellcheck flags (SC2086).
+      APT_OPTS=(-o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef)
 
       # --------------------------------------------------------------------------
       # Secrets
@@ -466,7 +468,7 @@ write_files:
               *"'"*)  die "${var} contains a single quote" "pick a password without \" ' @ / \\ or spaces" ;;
               *'@'*)  die "${var} contains '@'" "sqlplus easy-connect strings split on '@'; choose another password" ;;
               *'/'*)  die "${var} contains '/'" "sqlplus easy-connect strings split on '/'; choose another password" ;;
-              *'\'*)  die "${var} contains a backslash" "pick a password without \" ' @ / \\ or spaces" ;;
+              *[\\]*) die "${var} contains a backslash" "pick a password without \" ' @ / \\ or spaces" ;;
               *[[:space:]]*) die "${var} contains whitespace" "pick a password without \" ' @ / \\ or spaces" ;;
           esac
           if [[ ${#value} -lt 8 ]]; then
@@ -509,8 +511,8 @@ write_files:
               ok "docker $(docker --version | awk '{print $3}' | tr -d ,) already installed and answering"
           else
               info "installing prerequisites"
-              apt-get $APT_OPTS update -qq
-              apt-get $APT_OPTS install -y -qq ca-certificates curl gnupg jq e2fsprogs util-linux >/dev/null
+              apt-get "${APT_OPTS[@]}" update -qq
+              apt-get "${APT_OPTS[@]}" install -y -qq ca-certificates curl gnupg jq e2fsprogs util-linux >/dev/null
 
               info "adding Docker's apt repository"
               install -m 0755 -d /etc/apt/keyrings
@@ -531,8 +533,8 @@ write_files:
               fi
 
               info "installing docker-ce (this pulls ~120 MB)"
-              apt-get $APT_OPTS update -qq
-              apt-get $APT_OPTS install -y -qq \
+              apt-get "${APT_OPTS[@]}" update -qq
+              apt-get "${APT_OPTS[@]}" install -y -qq \
                   docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null \
                   || die "docker-ce install failed" "see /var/log/apt/term.log and re-run ${SCRIPT_NAME}"
               ok "docker $(docker --version | awk '{print $3}' | tr -d ,) installed"
@@ -757,8 +759,11 @@ write_files:
               # failure here is not fatal - we have a usable image.
               if [[ "$ORACLE_IMAGE" == *:latest ]]; then
                   info "refreshing the :latest tag (failure here is not fatal)"
-                  docker pull -q "$ORACLE_IMAGE" >/dev/null 2>&1 \
-                      && ok "refreshed" || warn "could not refresh; using the local copy"
+                  if docker pull -q "$ORACLE_IMAGE" >/dev/null 2>&1; then
+                      ok "refreshed"
+                  else
+                      warn "could not refresh; using the local copy"
+                  fi
               fi
               return 0
           fi
@@ -977,17 +982,65 @@ write_files:
           mode="$(pdb_open_mode)"
           if [[ "$mode" == "READ WRITE" ]]; then
               ok "${ORACLE_SERVICE} is READ WRITE"
-          else
-              info "${ORACLE_SERVICE} is '${mode:-not present}'; opening it"
-              sqlplus_sysdba "whenever sqlerror exit failure
-      alter pluggable database ${ORACLE_SERVICE} open;" >/dev/null
-              mode="$(pdb_open_mode)"
-              [[ "$mode" == "READ WRITE" ]] \
-                  || die "${ORACLE_SERVICE} is '${mode:-not present}' and would not open" \
-                         "docker logs ${ORACLE_CONTAINER_NAME}"
-              ok "${ORACLE_SERVICE} opened"
+              sqlplus_sysdba "alter pluggable database ${ORACLE_SERVICE} save state;" >/dev/null || true
+              return 0
           fi
-          sqlplus_sysdba "alter pluggable database ${ORACLE_SERVICE} save state;" >/dev/null || true
+
+          # POLL. Do not check once and give up.
+          #
+          # wait_for_database() returns as soon as v$instance.status = 'OPEN', but on a
+          # FIRST boot that is the CDB opening while DBCA is still creating the
+          # database — observed on a real VM at DBCA's own "30% complete" mark, a full
+          # 30 seconds before the instance reported OPEN. FREEPDB1 does not exist yet
+          # at that point.
+          #
+          # The original code did one check, one ALTER, one re-check, then died. The
+          # ALTER cannot succeed against a PDB that has not been created, so the whole
+          # Azure path failed on every first boot with:
+          #     fatal: FREEPDB1 is 'not present' and would not open
+          # and the 3600s ORACLE_READY_TIMEOUT never applied, because nothing looped.
+          #
+          # Wait for the PDB to appear, and only then try to open it. An ALTER against
+          # a non-existent PDB is noise, so it is attempted only once the name shows up
+          # in v$pdbs in some non-open state.
+          local deadline=$(( SECONDS + ORACLE_READY_TIMEOUT ))
+          local last_note=0 elapsed
+          info "${ORACLE_SERVICE} is '${mode:-not present}'; waiting for it (DBCA may still be creating it)"
+
+          while [[ $SECONDS -lt $deadline ]]; do
+              elapsed=$(( SECONDS ))
+
+              if ! container_running; then
+                  printf '\n'
+                  docker logs --tail 40 "$ORACLE_CONTAINER_NAME" 2>&1 | sed 's/^/         /' || true
+                  die "container ${ORACLE_CONTAINER_NAME} exited while waiting for ${ORACLE_SERVICE}" \
+                      "the last 40 log lines are above"
+              fi
+
+              mode="$(pdb_open_mode)"
+              if [[ "$mode" == "READ WRITE" ]]; then
+                  ok "${ORACLE_SERVICE} is READ WRITE after ${elapsed}s"
+                  sqlplus_sysdba "alter pluggable database ${ORACLE_SERVICE} save state;" >/dev/null || true
+                  return 0
+              fi
+
+              # Present but not open (MOUNTED, READ ONLY, MIGRATE): nudge it.
+              if [[ -n "$mode" ]]; then
+                  sqlplus_sysdba "alter pluggable database ${ORACLE_SERVICE} open;" >/dev/null 2>&1 || true
+              fi
+
+              if [[ $(( elapsed - last_note )) -ge 120 ]]; then
+                  info "still waiting for ${ORACLE_SERVICE} (${elapsed}s elapsed, currently '${mode:-not present}')"
+                  docker logs --tail 1 "$ORACLE_CONTAINER_NAME" 2>&1 | sed 's/^/         /' || true
+                  last_note=$elapsed
+              fi
+              sleep "$ORACLE_POLL_INTERVAL"
+          done
+
+          printf '\n'
+          docker logs --tail 40 "$ORACLE_CONTAINER_NAME" 2>&1 | sed 's/^/         /' || true
+          die "${ORACLE_SERVICE} was still '${mode:-not present}' after ${ORACLE_READY_TIMEOUT}s" \
+              "the last 40 log lines are above; re-run with --timeout 7200 if the disk is just slow"
       }
 
       # run_sql_checked <label> <sql-text>
@@ -1117,7 +1170,7 @@ write_files:
           # image does not set db_create_file_dest and a hardcoded path breaks the
           # moment Oracle changes its layout.
           local tbs_file
-          tbs_file="$(printf '%s' "$CONTOSO_TABLESPACE" | tr 'A-Z' 'a-z')01"
+          tbs_file="$(printf '%s' "$CONTOSO_TABLESPACE" | tr '[:upper:]' '[:lower:]')01"
           sql="whenever sqlerror exit failure
       alter session set container = ${ORACLE_SERVICE};
       declare
@@ -1401,6 +1454,11 @@ write_files:
           ok "wrote ${READY_MARKER}"
       }
 
+      # Wired to EXIT with `trap on_failure EXIT` at the foot of this file. shellcheck
+      # cannot see that indirect call, so it flags the body as unreachable (SC2317, on
+      # 0.10.x) and the function as never-invoked (SC2329, added in 0.11.0). Both are
+      # the same false positive; the directive is scoped to this one function.
+      # shellcheck disable=SC2317,SC2329  # invoked via trap, not called directly
       on_failure() {
           local rc=$?
           [[ $rc -eq 0 ]] && return 0
