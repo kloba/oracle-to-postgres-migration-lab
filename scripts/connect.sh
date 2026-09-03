@@ -304,13 +304,13 @@ oracle-local)
     if [[ -n "$SQL_COMMAND" ]]; then
         { oracle_login_sql localhost "$ORACLE_PORT"
           printf 'SET HEADING ON\n%s\nEXIT SUCCESS\n' "$SQL_COMMAND"
-        } | docker exec -i "$CONTAINER" sqlplus -S -L /nolog
+        } | docker exec -i -e NLS_LANG=.AL32UTF8 "$CONTAINER" sqlplus -S -L /nolog
     else
         printf '  %stype EXIT to leave%s\n\n' "$C_DIM" "$C_RESET"
         # -t keeps the SQL> prompt interactive; the login script arrives on fd 0
         # first, then the terminal takes over.
         { oracle_login_sql localhost "$ORACLE_PORT"; cat; } \
-            | docker exec -i "$CONTAINER" sqlplus -S -L /nolog
+            | docker exec -i -e NLS_LANG=.AL32UTF8 "$CONTAINER" sqlplus -S -L /nolog
     fi
     ;;
 
@@ -364,7 +364,8 @@ oracle-azure)
     ok "${O_USER}@${ORACLE_SERVICE} on ${VM_NAME}"
     # $CONTAINER is deliberately expanded here, on the client, and printf %q
     # quotes it safely for the remote shell.
-    REMOTE_CMD="docker exec -i $(printf '%q' "$CONTAINER") sqlplus -S -L /nolog"
+    # See the NLS_LANG note in scripts/seed-oracle.sh: never inherit it from the image.
+    REMOTE_CMD="docker exec -i -e NLS_LANG=.AL32UTF8 $(printf '%q' "$CONTAINER") sqlplus -S -L /nolog"
     # shellcheck disable=SC2029  # $REMOTE_CMD is deliberately expanded locally; printf %q quoted it above
     if [[ -n "$SQL_COMMAND" ]]; then
         { oracle_login_sql localhost "$ORACLE_PORT"

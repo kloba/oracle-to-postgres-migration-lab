@@ -501,7 +501,24 @@ if [[ "$TARGET" == "local" ]]; then
     # from their own machine; it is simply not what docker exec sees.
     ORACLE_TARGET_HOST='localhost'
     ORACLE_TARGET_PORT='1521'
-    exec_sqlplus() { docker exec -i "$CONTAINER" sqlplus -S -L /nolog; }
+    # NLS_LANG is set explicitly, never inherited from the image.
+    #
+    # sqlplus uses NLS_LANG to declare what character set the bytes it sends are
+    # already in. Unset, it assumes a single-byte client charset and "converts"
+    # UTF-8 on the way in. The seed data is deliberately full of non-ASCII (T-03
+    # exercises exactly this), so a 24-byte Greek surname arrived as 72 bytes and
+    # the load died:
+    #     ORA-12899: value too large for column "CONTOSO"."CUSTOMER"."LAST_NAME"
+    #                (actual: 72, maximum: 60)
+    #
+    # This passed locally for months purely by luck: gvenzl/oracle-free sets
+    # NLS_LANG=.AL32UTF8 in the image, and Oracle's own
+    # container-registry.oracle.com/database/free does not. So the bug was
+    # invisible on the local path and fatal on the documented Azure one.
+    # Both databases are AL32UTF8; only the client declaration differed.
+    exec_sqlplus() {
+        docker exec -i -e NLS_LANG=.AL32UTF8 "$CONTAINER" sqlplus -S -L /nolog
+    }
 
 else
     hdr "Target: Azure Oracle VM via Bastion"
@@ -571,7 +588,7 @@ else
     exec_sqlplus() {
         # shellcheck disable=SC2029  # $CONTAINER is meant to expand locally; printf %q quotes it for the remote shell
         ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
-            "docker exec -i $(printf '%q' "$CONTAINER") sqlplus -S -L /nolog"
+            "docker exec -i -e NLS_LANG=.AL32UTF8 $(printf '%q' "$CONTAINER") sqlplus -S -L /nolog"
     }
 fi
 
