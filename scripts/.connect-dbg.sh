@@ -183,12 +183,7 @@ free_port() {
     local p="$1" limit=$(( $1 + 60 ))
     while [[ "$p" -lt "$limit" ]]; do
         if ! (exec 3<>"/dev/tcp/127.0.0.1/${p}") 2>/dev/null; then printf '%s' "$p"; return 0; fi
-        # Braces matter. `exec` with no command applies its redirections to the
-        # CURRENT SHELL, permanently -- so `exec 3>&- 2>/dev/null` does not
-        # scope the 2>/dev/null to the fd-close, it points the whole script's
-        # stderr at /dev/null for the rest of the run. Every later die() then
-        # printed nothing: --azure failed after 3s with no error at all.
-        { exec 3>&-; } 2>/dev/null || true
+        exec 3>&- 2>/dev/null || true
         p=$(( p + 1 ))
     done
     return 1
@@ -220,7 +215,7 @@ open_tunnel() {
         --target-resource-id "$resid" --resource-port "$rport" --port "$lport" >/dev/null 2>&1 &
     TUNNEL_PID=$!
     until (exec 3<>"/dev/tcp/127.0.0.1/${lport}") 2>/dev/null; do
-        { exec 3>&-; } 2>/dev/null || true
+        exec 3>&- 2>/dev/null || true
         sleep 1
         waited=$(( waited + 1 ))
         kill -0 "$TUNNEL_PID" 2>/dev/null || die "the Bastion tunnel process exited immediately" \
@@ -231,7 +226,7 @@ open_tunnel() {
         [[ "$waited" -lt 45 ]] || die "Bastion tunnel did not open within 45s" \
             "az network bastion tunnel --name '${bastion}' --resource-group '${rg}' --target-resource-id '${resid}' --resource-port ${rport} --port ${lport}"
     done
-    { exec 3>&-; } 2>/dev/null || true
+    exec 3>&- 2>/dev/null || true
     ok "tunnel up on 127.0.0.1:${lport}"
 }
 
@@ -455,6 +450,7 @@ postgres|scratch)
         [[ -n "$PG_LPORT" ]] || die "no free local port for the PostgreSQL forward" "pass --port <n>"
 
         trap fwd_cleanup EXIT INT TERM
+        PS4='+[${LINENO}] '; set -x
         info "forwarding 127.0.0.1:${PG_LPORT} -> ${P_HOST}:${P_PORT} via ${VM_NAME}"
         ssh -N -L "${PG_LPORT}:${P_HOST}:${P_PORT}" \
             -i "$SSH_KEY" -p "$SSH_LPORT" \
@@ -466,7 +462,7 @@ postgres|scratch)
 
         WAITED=0
         until (exec 3<>"/dev/tcp/127.0.0.1/${PG_LPORT}") 2>/dev/null; do
-            { exec 3>&-; } 2>/dev/null || true
+            exec 3>&- 2>/dev/null || true
             sleep 1
             WAITED=$(( WAITED + 1 ))
             kill -0 "$SSH_FWD_PID" 2>/dev/null || die "the SSH port-forward exited immediately" \
@@ -475,7 +471,8 @@ postgres|scratch)
             [[ "$WAITED" -lt 30 ]] || die "the port-forward did not open within 30s" \
                 "check the private DNS zone links the VNet to ${P_HOST} - see docs/troubleshooting.md"
         done
-        { exec 3>&-; } 2>/dev/null || true
+        exec 3>&- 2>/dev/null || true
+        set +x
         ok "PostgreSQL reachable on 127.0.0.1:${PG_LPORT}"
 
         PG_CONNECT_HOST='127.0.0.1'

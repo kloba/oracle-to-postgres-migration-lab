@@ -455,7 +455,12 @@ free_port() {
     local p="$1" limit=$(( $1 + 60 ))
     while [[ "$p" -lt "$limit" ]]; do
         if ! (exec 3<>"/dev/tcp/127.0.0.1/${p}") 2>/dev/null; then printf '%s' "$p"; return 0; fi
-        exec 3>&- 2>/dev/null || true
+        # Braces matter. `exec` with no command applies its redirections to the
+        # CURRENT SHELL, permanently -- so `exec 3>&- 2>/dev/null` does not
+        # scope the 2>/dev/null to the fd-close, it points the whole script's
+        # stderr at /dev/null for the rest of the run. Every later die() then
+        # printed nothing: --azure failed after 3s with no error at all.
+        { exec 3>&-; } 2>/dev/null || true
         p=$(( p + 1 ))
     done
     return 1
@@ -537,7 +542,7 @@ else
 
     WAITED=0
     until (exec 3<>"/dev/tcp/127.0.0.1/${SSH_PORT}") 2>/dev/null; do
-        exec 3>&- 2>/dev/null || true
+        { exec 3>&-; } 2>/dev/null || true
         sleep 1
         WAITED=$(( WAITED + 1 ))
         kill -0 "$TUNNEL_PID" 2>/dev/null || die "the Bastion tunnel process exited immediately" \
@@ -546,7 +551,7 @@ else
         [[ "$WAITED" -lt 45 ]] || die "Bastion tunnel did not open within 45s" \
             "az network bastion tunnel --name '${BASTION}' --resource-group '${RG}' --target-resource-id '${VM_ID}' --resource-port 22 --port ${SSH_PORT}"
     done
-    exec 3>&- 2>/dev/null || true
+    { exec 3>&-; } 2>/dev/null || true
     ok "tunnel up on 127.0.0.1:${SSH_PORT}"
 
     SSH_OPTS=(-i "$SSH_KEY" -p "$SSH_PORT"
