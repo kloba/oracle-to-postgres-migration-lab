@@ -10,12 +10,13 @@ Read this before you spend money.
 
 > **The short version.** The Oracle side of this lab is real and proven: the schema builds, it is
 > large, it is valid, and it contains the hard cases it claims to. The Azure side has been deployed,
-> verified and destroyed. And as of **2026-09-04 the AI conversion has been run for real**: the
-> wizard was driven end to end, all four connections validated against live resources, **1,299
-> objects were extracted from Oracle**, and the conversion executed against the deployed `gpt-5.2`
-> model. Doing it found **four defects in this lab**, all now fixed — see §1.10. What is still
-> unfinished: the conversion had not produced its final report at the time of writing, **no data has
-> been migrated**, and every per-case prediction in `docs/design.md` remains a prediction.
+> verified and destroyed. And as of **2026-09-04 the AI conversion has been run end to end and
+> completed**: the wizard was driven through every step, **1,299 objects were extracted from
+> Oracle**, and `gpt-5.2` converted **947 of 1,185 objects (79.92%) in 2h 56m for 7.2M tokens**. The
+> reports are committed in [docs/conversion-report/](conversion-report/README.md). Doing it found
+> **four defects in this lab**, all now fixed — see §1.10. What is still unfinished: **no data has
+> been migrated**, and nobody has yet compared the report against the 43 per-case predictions in
+> `docs/design.md`.
 
 
 ---
@@ -220,7 +221,21 @@ a genuinely better path than either documented option for anyone on a Mac, and i
 | Foundry + **Test Connection** | green, using **Microsoft Entra Id**, after defect 2 was diagnosed |
 | **Create Migration Project** | project written to `~/.github/postgres-migrations/contoso-conversion/` |
 | DDL extraction | **1,299 extracted, 0 failed, 185 excluded, 7 unsupported types, in 2m 50s**, after defect 3 was fixed |
-| AI conversion | executing against `gpt-5.2` with **zero `[ERROR]` lines**; package-aware; a real compile-and-fix loop |
+| AI conversion | **COMPLETED. 947 of 1,185 objects (79.92%) in 2h 56m 53s, 7,178,840 tokens** against `gpt-5.2` |
+
+The reports are committed: [docs/conversion-report/](conversion-report/README.md). `TABLE`,
+`SEQUENCE`, `TYPE` and `SCHEMA` converted at **100%**, `FUNCTION` at 97%, `INDEX` at 97%,
+`PACKAGE_BODY` at **30%**.
+
+**Read the failure reasons before the percentage.** Counting the tool's own stated reasons: **628
+`chunk timeout`, 176 `lock timeout`, 38 `does not exist`, 4 `deadlock`**. Four fifths are timeouts
+and lock contention in the scratch database, not translation errors. The compile-and-validate stage
+holds a transaction open per object while its LLM fix call is in flight, and the tool sets
+`lock_timeout = 0`; with ~20 chunks in flight against one scratch database, workers serialise on
+catalog locks and the run **stalled twice** in a cycle PostgreSQL cannot detect as a deadlock
+because it runs through the client. Four backend terminations were needed to finish. Some of the 238
+failures are collateral from those terminations and cannot be separated from the rest, so **this
+result is a lower bound on what the tool can do, not an upper one.**
 
 **The four defects, all fixed:**
 
@@ -245,13 +260,11 @@ a genuinely better path than either documented option for anyone on a Mac, and i
    behind a UI banner that said only *Extraction Failed*. `scripts/seed-oracle.sh` now makes the
    grant as `SYSDBA`, and treats a failure as a hard error rather than a skip.
 
-**What this run does NOT establish.** It had not produced its final conversion report at the time of
-writing, so the per-case predictions in `docs/design.md` §9 are still predictions (§2.2). No data was
-migrated (§2.3). And the timing claim is now known to be optimistic rather than merely unverified:
-roughly a quarter of the 56 chunks were complete at the 50-minute mark, against a documented estimate
-of 45–90 minutes for the whole thing. `pg_stat_activity` shows why — seventeen workers each holding
-an open transaction while their LLM call is in flight, serialising on catalog locks in the one
-scratch database.
+**What this run does NOT establish.** Nobody has compared the report against the 43 per-case
+predictions in `docs/design.md` §9, so those remain predictions (§2.2). No data was migrated (§2.3).
+And the timing claim is now known to be wrong rather than merely unverified: **2h 56m** against a
+documented estimate of 45–90 minutes, with two hard stalls on the way. The token cost, **$15.50 at
+the tool's own running estimate**, does land inside the documented $5–30.
 
 ---
 
@@ -282,25 +295,21 @@ later renamed it to `outputs.json.stale` — so the Bicep output names the scrip
 than the old static consistency check, but it is still not evidence that `connect.sh`, `status.sh`,
 or a seed against the VM works.
 
-### 2.2 The conversion's *results*. Still unobserved.
+### 2.2 The conversion's *results* have not been checked against the predictions
 
-The conversion itself has now been run (§1.10) — this section is no longer "never run", but almost
-everything downstream of "it started converting" is still open:
+The conversion has now been run and has produced a report (§1.10,
+[docs/conversion-report/](conversion-report/README.md)). What is still open:
 
-- **The final conversion report.** At the time of writing the run had converted 263 of 1,299 objects
-  with 0 failures and had not produced its report. Until it does, nothing here says how much of this
-  schema converts cleanly.
 - **Every prediction in `docs/design.md` section 9** — the "10 clean, 21 partial, 12 review task"
-  split and all 43 per-case predictions. **Zero have been checked against a report.**
-- **The `plpgsql_check` validation pass.** The extension is now confirmed installed *and loaded* on
-  the live server (§1.10), and **Verify Extensions** passes, but no report has been read that shows
-  what it caught.
-- **Schema Review (step 2) and Application Migration (step 3).** Both were visible in the project
-  page and neither was run.
+  split and all 43 per-case predictions. A report now exists to check them against. **Nobody has
+  done the comparison.** Doing it properly needs a run that did not have to be unstuck by hand.
+- **What `plpgsql_check` actually caught.** The extension is confirmed installed *and loaded* on the
+  live server and **Verify Extensions** passes, but the report has not been read for its findings.
+- **Schema Review (step 2) and Application Migration (step 3).** Both visible on the project page,
+  neither run. `review_tasks.md` lists **641 objects needing a manual touch**; none were worked.
 - **GitHub Copilot agent mode on the review-task queue.** Never exercised.
-- **The token cost.** $2.97 at the 50-minute mark for a quarter of the work, against a documented
-  $5–30 for the whole run. That is at least the right order of magnitude, but it is not a final
-  number.
+- **Whether the converted DDL deploys.** 2,268 `.sql` files were produced and a `deploy.sql` exists.
+  It has never been executed against `contoso_store`.
 
 ### 2.3 Data migration and validation. Never run.
 
@@ -485,9 +494,10 @@ back into the repo. Redact both before pasting preflight output into an issue or
 | Deploy the Azure environment from Bicep | **Yes.** Deployed for real and destroyed clean on 2026-09-02 (§1.6); the live resources were verified (§1.7) |
 | Seed Oracle on the Azure VM, or run `connect.sh` / `status.sh` live | **Yes.** `seed-oracle.sh --azure` loaded 1,855 objects onto the VM and the tunnels it needs work (§1.10) |
 | Drive the AI conversion wizard through every step | **Yes**, and it found four defects in this lab on the way (§1.10) |
-| Compare a conversion report against the 43 predictions | **No.** The run started and converted cleanly; no report has been read (§2.2) |
-| Trust the cost estimates | Order-of-magnitude only. The one real datapoint: **$2.97 of tokens for ~25% of a conversion** |
-| Trust the 45–90 minute conversion estimate | **No.** Measured pace suggests roughly three hours for this schema (§1.10) |
+| Read a real conversion report for this schema | **Yes.** [docs/conversion-report/](conversion-report/README.md) — 947 of 1,185 objects, 79.92% |
+| Compare that report against the 43 predictions | **No.** The report exists; nobody has done the comparison (§2.2) |
+| Trust the cost estimates | Order-of-magnitude. One real datapoint: **7.2M tokens, ~$15.50** for one conversion |
+| Trust the 45–90 minute conversion estimate | **No.** Measured **2h 56m**, with two stalls needing manual intervention (§1.10) |
 
 **Recommended first step:** `./scripts/seed-oracle.sh --local --scale 0.01`, then
 `./tests/run-tests.sh --local --scale 0.01`. That path is proven, costs nothing, and exercises the

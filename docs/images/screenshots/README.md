@@ -8,8 +8,9 @@ The earlier version of this page described a run that stopped at step 3 of the
 wizard and gave a *guess* about why. That guess was wrong, and it is corrected in
 §"What the earlier version of this page got wrong". This run went all the way
 through: every wizard step validated, a project created, **1,299 objects
-extracted from Oracle**, and the AI conversion executing against Microsoft
-Foundry.
+extracted from Oracle**, and **the conversion completed** — 2h 56m, 7.2M tokens,
+947 of 1,185 objects converted. The reports are in
+[docs/conversion-report/](../../conversion-report/README.md).
 
 Four defects in this lab were found by doing it. All four are fixed in the repo;
 each is credited to the screenshot that exposed it.
@@ -164,44 +165,55 @@ the empty result is not.
 the skip it uses for the optional `DBMS_RLS` grant — losing this one costs you the
 whole conversion, not one hard case.
 
-## What the conversion actually did
+## What the conversion actually did — `09-migration-complete.png`
 
-With extraction fixed, the AI conversion ran against Foundry for real. From
-`convert/sessions/<id>/internal/logs/conversion.log`:
-
-- **56 chunks**, 1,299 objects, `workers=5` for extraction and up to **23 chunks
-  in flight** for conversion under an AIMD window.
-- **Zero `[ERROR]` lines** across the whole run.
-- Package-aware conversion: `Package PKG_ERROR converted: 3/3 members converted,
-  0 skipped, 0 failed`, with spec stubs removed before body reassembly.
-- A compile-and-fix loop that is genuinely a loop:
-  `Fix attempt 1/8 recompile CONTOSO.PROCEDURE.SP_GEN_RULE_APPLY_001: OK (PG 0.015s)`
-  → `Fixed … on attempt 1`.
-- Honest self-reporting of its own estimator:
-  `chunk-006: token estimate drift 283% (est=5713, actual_prompt=21875)`.
-
-**It is much slower than this lab's docs claim.** `docs/design.md` predicts 45–90
-minutes. Roughly a quarter of the chunks were done at the 50-minute mark, which
-extrapolates to something like three hours for this schema. Where the time goes is
-visible in `pg_stat_activity` on the scratch database:
+It finished. **Migration Complete**, and the extension opens its own Conversion
+Summary beside the project page:
 
 ```text
-state                 wait_event   count  longest
-idle in transaction   ClientRead      17  00:14:49
-active                transactionid    1  00:00:08
+Status              COMPLETED
+Source DB           Oracle 23.26.3.0.0        Target DB   PostgreSQL 16
+Model               gpt-5.2                   Extension   1.30.1
+Duration            2h 56m 53s                Tokens      7,178,840
+Objects extracted   1,189   Converted 947   Not-Converted 242   79.65%
 ```
 
-Seventeen workers each holding an open transaction while their LLM call is in
-flight, and one blocked on `CREATE TYPE _mig_scratch_contoso.…` behind a peer.
-The tool copes — it logs `Cycle deadlock: releasing…` and retries — but on a
-1,299-object schema with one scratch database it spends a lot of wall-clock there.
+The reports themselves are committed to
+[docs/conversion-report/](../../conversion-report/README.md) with the numbers, the
+per-type breakdown, and — more useful than the percentage — the tool's own reasons
+for its failures. The short version: `TABLE`, `SEQUENCE`, `TYPE` and `SCHEMA`
+converted at **100%**, `FUNCTION` at 97%, `PACKAGE_BODY` at 30%, and roughly four
+fifths of the stated failure reasons are **`chunk timeout`** or **`lock timeout …
+in relation pg_proc`** rather than anything to do with translation quality.
+
+**It is far slower than this lab's docs claim.** `docs/design.md` predicts 45–90
+minutes; this took just under three hours, and it stalled twice hard enough to need
+manual intervention. Where the time goes is visible in `pg_stat_activity` on the
+scratch database:
+
+```text
+state                 wait_event        count   longest
+idle in transaction   Client/ClientRead    17   00:36:14
+active                Lock/transactionid    1   00:20:14
+```
+
+Seventeen workers each holding a transaction open while their LLM call is in
+flight, one blocked behind a peer on a catalog lock, and `lock_timeout` set to `0`
+by the tool — so PostgreSQL cannot break it and nothing times out. The cycle runs
+through the client, which is exactly the shape PostgreSQL's deadlock detector
+cannot see. Terminating the blocking backend released it each time; four
+terminations were needed across the run.
+
+That intervention has a cost, and the report carries it: some of the 238
+not-converted objects are collateral from those terminations, and they cannot be
+told apart from genuine failures. **Read the report as a lower bound.**
 
 **One caveat, stated rather than buried:** `install-pg-extensions.sh` was run
 against `migration_scratch` *while the conversion was live*, and the first
 `canceling statement due to lock … in relation "pg_proc"` appears about four
 minutes later. Creating thirteen extensions under a running converter is a
-plausible contributor to the lock contention above. Install the extensions
-before you start the wizard, which is what `deploy.sh` now does.
+plausible contributor to the early contention. Install the extensions before you
+start the wizard, which is what `deploy.sh` now does.
 
 ## What the earlier version of this page got wrong
 

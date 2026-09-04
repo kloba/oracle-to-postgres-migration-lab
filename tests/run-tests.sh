@@ -200,7 +200,18 @@ find_repo_files() {
 SH_FILES=(); PY_FILES=(); MD_FILES=(); BICEP_FILES=(); BICEPPARAM_FILES=()
 while IFS= read -r f; do [[ -n "$f" ]] && SH_FILES+=("$f");         done < <(find_repo_files -name '*.sh')
 while IFS= read -r f; do [[ -n "$f" ]] && PY_FILES+=("$f");         done < <(find_repo_files -name '*.py')
-while IFS= read -r f; do [[ -n "$f" ]] && MD_FILES+=("$f");         done < <(find_repo_files -name '*.md')
+# docs/conversion-report/ is the conversion tool's own output, committed verbatim
+# as evidence. Its reports cross-link to per-chunk files we deliberately do not
+# ship (56 of them, each linking on further), so linting it would report ~700
+# broken links against documents nobody here wrote and nobody should edit. Its
+# own README is hand-written and is checked.
+while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    case "$f" in
+        "${REPO_ROOT}/docs/conversion-report/"*) [[ "$f" == */README.md ]] || continue ;;
+    esac
+    MD_FILES+=("$f")
+done < <(find_repo_files -name '*.md')
 while IFS= read -r f; do [[ -n "$f" ]] && BICEP_FILES+=("$f");      done < <(find_repo_files -name '*.bicep')
 while IFS= read -r f; do [[ -n "$f" ]] && BICEPPARAM_FILES+=("$f"); done < <(find_repo_files -name '*.bicepparam')
 
