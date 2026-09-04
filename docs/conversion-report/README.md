@@ -114,6 +114,12 @@ Two files from the same session are **not** committed: `customer_summary.md`
 same remediation paragraph hundreds of times; the same information is in the CSV in
 a form you can actually query. Regenerate them by running the conversion yourself.
 
+Nor is the converted schema itself: **9.1 MB of `.sql` under `postgres_ddl/`** and a
+**1.8 MB `deploy.sql`** that concatenates it in dependency order. It is machine
+output, it is reproducible, and it would dominate this repository. It has also
+**never been executed** — `contoso_store` is still empty. See
+[docs/lab-status.md](../lab-status.md) §2.2.
+
 ## This does not close `docs/design.md` section 9
 
 `docs/design.md` predicts, for each of 43 hard cases, whether it converts clean,
