@@ -322,6 +322,25 @@ so it is the documented local default. The official image works locally too, and
 disproves an earlier claim here that a login was required. Both are Oracle Free 23ai; the
 conversion itself has still never been run against either (§2.2).
 
+### 3.9 ARM64 / Apple Silicon — partially resolved (2026-09-04)
+
+The client half of the ARM64 worry is answered: the marketplace serves a
+**`darwin-arm64` build** of `ms-ossdata.vscode-pgsql` (1.30.0), it installs and
+activates on macOS 15.7.9 arm64, all 7 migration commands and the `pg-migrations`
+view are present, the wizard runs, and it **connected to the Azure Oracle VM and
+enumerated `CONTOSO`** through a Bastion tunnel. Evidence and screenshots:
+[docs/images/screenshots/](images/screenshots/README.md).
+
+Unchanged: this is one machine on one day, and it is not a support statement.
+The jumpbox remains the documented path, and it avoids the tunnelling a laptop
+needs, since neither VM has a public IP and PostgreSQL is private-access only.
+
+Still NOT resolved: the conversion itself has still never been run. The wizard
+reached the scratch-database step and stopped there — that step requires a saved
+Azure PostgreSQL connection profile, and the steps after it need interactive
+Azure and GitHub Copilot sign-ins. Every hard-case prediction in `docs/design.md`
+remains a prediction.
+
 ### 3.4 Unused `.env.example` variables — resolved
 
 `AZ_TENANT_ID`, `VSCODE_EXTENSION_ID`, `VSCODE_MIN_VERSION`, `EXTENSION_MIN_VERSION`,
