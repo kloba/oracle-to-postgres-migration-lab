@@ -94,17 +94,34 @@ parameter and ARM cannot restart the server — `scripts/deploy.sh` now performs
 that restart and `scripts/status.sh` asserts it. Run Verify Extensions before
 trusting any conversion report.
 
-## Where this stops, precisely
+## Where this stops, and why — diagnosed, not assumed
 
-**Not done: the conversion itself.** The run reached step 3 and did not complete.
-Two things remain, and neither is a defect in the lab:
+**Not done: the conversion itself.** The run reaches step 3 and stops there. The
+first write-up of this guessed at the reason; here is what actually blocks it.
 
-1. **The scratch step wants a saved Azure PostgreSQL connection profile.** A
-   tunnelled `127.0.0.1:15432` endpoint is not obviously one. Whether the
-   extension accepts a tunnelled profile here is untested.
-2. **Foundry model configuration and the review queue need interactive
-   sign-ins** — to Azure for the model, and to GitHub Copilot (Pro+, Business or
-   Enterprise) for agent mode. Those are browser OAuth flows.
+A tunnelled PostgreSQL connection **does work**. A profile pointing at
+`postgresql://o2padmin@127.0.0.1:15432/migration_scratch?sslmode=require` passes
+the extension's own **Test Connection**, saves, connects, and browses — the
+sidebar lists its Databases, Roles and Tablespaces against the real Azure server.
+So "the tunnel is not good enough" was wrong.
+
+The wizard still will not offer it. `POSTGRESQL CONNECTION` stays empty and
+`Refresh Profiles` spins on *Loading…* indefinitely. The reason is in the
+extension's own bundle: `dist/extension.js` references `listFlexibleServers`,
+`armEndpoint`, `subscriptionId`, `getSubscriptions`, `azureResourceService` and
+`azureAccount`. **That step enumerates Azure Database for PostgreSQL flexible
+servers through Azure Resource Manager** — it lists *subscription resources*, not
+local connection profiles. A profile you typed in by hand has no ARM identity, so
+it can never appear there however well it connects.
+
+Which makes the gate an **interactive Azure sign-in inside VS Code**, consistent
+with the AZURE DEPLOYMENTS panel reading "No Azure Deployments" and with no Azure
+auth in VS Code's global storage. The same applies to GitHub Copilot (Pro+,
+Business or Enterprise) for the review queue. Both are browser OAuth flows.
+
+The practical consequence for this lab: **sign in to Azure in VS Code before
+opening the wizard**, and prefer the jumpbox, where the servers are ARM-visible
+and no tunnelling is involved at all.
 
 So every prediction in `docs/design.md` about which of the 44 hard cases survive
 conversion **remains a prediction**. Nothing here changes that.

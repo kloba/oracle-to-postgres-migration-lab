@@ -335,11 +335,16 @@ Unchanged: this is one machine on one day, and it is not a support statement.
 The jumpbox remains the documented path, and it avoids the tunnelling a laptop
 needs, since neither VM has a public IP and PostgreSQL is private-access only.
 
-Still NOT resolved: the conversion itself has still never been run. The wizard
-reached the scratch-database step and stopped there — that step requires a saved
-Azure PostgreSQL connection profile, and the steps after it need interactive
-Azure and GitHub Copilot sign-ins. Every hard-case prediction in `docs/design.md`
-remains a prediction.
+Still NOT resolved: the conversion itself has still never been run, and the
+blocker is now diagnosed rather than guessed. A tunnelled PostgreSQL profile
+DOES work — it passes the extension's Test Connection, saves, connects and
+browses the real Azure server. The wizard still will not list it, because the
+scratch step enumerates flexible servers through **Azure Resource Manager**
+(`getSubscriptions` / `listFlexibleServers` / `azureResourceService` in the
+extension bundle), so it shows subscription resources, not hand-entered
+profiles. The gate is therefore an **interactive Azure sign-in inside VS Code**,
+plus GitHub Copilot for the review queue — both browser OAuth flows. Every
+hard-case prediction in `docs/design.md` remains a prediction.
 
 ### 3.4 Unused `.env.example` variables — resolved
 
