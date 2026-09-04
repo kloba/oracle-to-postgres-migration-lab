@@ -847,6 +847,56 @@ SYSDBA
     fi
 }
 
+# SELECT on the V$ dynamic performance views, which SYS owns and which a stock
+# CONTOSO cannot read. Same SYSDBA-only story as DBMS_RLS above, and the same
+# placement: after 00-*, which drops and recreates the user.
+#
+# This one is NOT cosmetic, and it is not about a hard case. The VS Code
+# extension's extractor sizes its Oracle connection pool by asking
+# V$RESOURCE_LIMIT how many sessions are free, and it does that in
+# connection_pool.auto_detect_workers() BEFORE it enumerates a single object.
+# Without the grant that query raises
+#
+#   ORA-00942: table or view "SYS"."V_$RESOURCE_LIMIT" does not exist
+#
+# the pool never initialises, and the run ends "Extraction Failed ... 0
+# extracted, 0 failed, 0 excluded" with nothing in the UI to say why. A real run
+# against this lab failed exactly that way; the grant fixed it and the same run
+# then extracted 1,299 objects. So a failure here is reported as a hard error --
+# it costs you the entire conversion, not one hard case.
+#
+# Note V_$RESOURCE_LIMIT, not V$RESOURCE_LIMIT: V$ names are public synonyms and
+# you cannot grant on a synonym. Note also that the view returns zero rows inside
+# a PDB (it is a CDB-level view). That is fine -- the extractor logs
+# "Auto-detected workers: 5 (sessions: 0/0, available: 0)" and carries on. It is
+# the missing privilege that is fatal, not the empty result.
+grant_catalog_read() {
+    local log="${RUN_LOG_DIR}/000-sysdba-catalog-read.log" rc=0
+    printf '  %-4s %-44s ' '--' 'grant select on v_$ views (as sysdba)'
+    exec_sqlplus > "$log" 2>&1 <<SYSDBA || rc=$?
+WHENEVER SQLERROR EXIT FAILURE
+CONNECT / AS SYSDBA
+ALTER SESSION SET CONTAINER = ${ORACLE_SERVICE};
+GRANT SELECT_CATALOG_ROLE TO ${CONTOSO_SCHEMA};
+GRANT SELECT ON sys.v_\$resource_limit TO ${CONTOSO_SCHEMA};
+GRANT SELECT ON sys.v_\$session        TO ${CONTOSO_SCHEMA};
+GRANT SELECT ON sys.v_\$parameter      TO ${CONTOSO_SCHEMA};
+GRANT SELECT ON sys.v_\$instance       TO ${CONTOSO_SCHEMA};
+GRANT SELECT ON sys.v_\$database       TO ${CONTOSO_SCHEMA};
+EXIT SUCCESS
+SYSDBA
+    if [[ "$rc" -eq 0 ]] && ! grep -qE '^(ORA-|PLS-)[0-9]' "$log" 2>/dev/null; then
+        printf '%10s  %sok%s\n' '-' "$C_GREEN" "$C_RESET"
+    else
+        printf '%10s  %sFAIL%s\n' '-' "$C_RED" "$C_RESET"
+        printf '       %sthe conversion tool will fail at pool init with ORA-00942 and%s\n' "$C_RED" "$C_RESET"
+        printf '       %sextract 0 objects; grant it by hand before running the wizard:%s\n' "$C_RED" "$C_RESET"
+        printf '       %s  GRANT SELECT ON sys.v_$resource_limit TO %s;%s\n' "$C_DIM" "$CONTOSO_SCHEMA" "$C_RESET"
+        printf '       %ssee %s%s\n' "$C_DIM" "${log#"$REPO_ROOT"/}" "$C_RESET"
+        FAILED=$(( FAILED + 1 ))
+    fi
+}
+
 # Harmless SP2- messages that are not failures.
 SP2_IGNORE='SP2-0640|SP2-0641|SP2-0851'
 
@@ -937,8 +987,8 @@ for F in ${FILES[@]+"${FILES[@]}"}; do
 
     if [[ -z "$HARD_ERR" ]]; then
         printf '%10s  %sok%s\n' "$(fmt_ms "$MS")" "$C_GREEN" "$C_RESET"
-        # The one grant 00-* cannot make for itself, made straight after it.
-        if runs_as_system "$F"; then grant_dbms_rls; fi
+        # The grants 00-* cannot make for itself, made straight after it.
+        if runs_as_system "$F"; then grant_dbms_rls; grant_catalog_read; fi
     else
         printf '%10s  %sFAIL%s\n' "$(fmt_ms "$MS")" "$C_RED" "$C_RESET"
         printf '       %s%s%s\n' "$C_RED" "$HARD_ERR" "$C_RESET"

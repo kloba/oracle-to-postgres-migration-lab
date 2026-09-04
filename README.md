@@ -374,7 +374,8 @@ re-seed.
 oracle-to-postgres-migration-lab/
 ├── docs/          this documentation, plus design.md — the binding contract
 ├── infra/         Bicep: VNet, Oracle VM, PostgreSQL flexible server, Foundry, jumpbox, Bastion
-├── scripts/       bash drivers: preflight.sh, deploy.sh, seed-oracle.sh, connect.sh, status.sh, destroy.sh
+├── scripts/       bash drivers: preflight.sh, deploy.sh, seed-oracle.sh, connect.sh, status.sh,
+│                  install-pg-extensions.sh, destroy.sh
 ├── src/oracle/    the hand-written CONTOSO schema, numbered 00 → 13, plus 99-verify-objects.sql
 ├── tools/         generate-objects.py, generate-data.py — stdlib only, no pip install — and ora2pg.conf
 ├── tests/         assertions run against Oracle, plus the repository's static checks

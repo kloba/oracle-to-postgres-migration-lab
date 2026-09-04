@@ -493,7 +493,7 @@ if [[ "$PREREQ_FAIL" -ne 0 ]]; then
     printf 'and cannot be re-validated afterwards - you would have to convert again.\n\n'
     printf '  az postgres flexible-server parameter set --resource-group %s \\\n' "$RG"
     printf '    --server-name <server> --name azure.extensions \\\n'
-    printf '    --value "%s"\n\n' "${PG_REQUIRED_EXTENSIONS:-orafce,uuid-ossp,pgcrypto,pg_trgm,postgis,postgis_topology,postgis_tiger_geocoder,pg_partman,pg_stat_statements,plpgsql_check,dblink}"
+    printf '    --value "%s"\n\n' "${PG_REQUIRED_EXTENSIONS:-orafce,uuid-ossp,pgcrypto,pg_trgm,postgis,postgis_topology,postgis_tiger_geocoder,pg_partman,pg_stat_statements,plpgsql_check,dblink,tablefunc}"
     printf 'Then set shared_preload_libraries to "%s" and restart the server.\n\n' \
         "${PG_PRELOAD_LIBRARIES:-pg_partman_bgw,pg_stat_statements,plpgsql_check}"
     exit 1

@@ -278,6 +278,76 @@ END;
 /
 
 --------------------------------------------------------------------------------
+-- SELECT on the V$ dynamic performance views.
+--
+-- Same SYS-only story as DBMS_RLS above, but this one is not about a hard case
+-- -- it decides whether the conversion tool runs at all.
+--
+-- The VS Code extension's extractor sizes its Oracle connection pool from
+-- V$RESOURCE_LIMIT, in auto_detect_workers(), BEFORE it enumerates a single
+-- object. Without the privilege that query raises ORA-00942 and the whole run
+-- ends "Extraction Failed ... 0 extracted, 0 failed, 0 excluded" with nothing
+-- in the UI to explain why. A real run of this lab failed exactly that way.
+--
+-- V_$RESOURCE_LIMIT, not V$RESOURCE_LIMIT: the V$ names are public synonyms and
+-- you cannot grant on a synonym. The view returns zero rows inside a PDB, which
+-- is fine -- the extractor logs "sessions: 0/0, available: 0" and carries on.
+-- It is the missing privilege that is fatal, not the empty result.
+--------------------------------------------------------------------------------
+DECLARE
+  TYPE t_views IS TABLE OF VARCHAR2(30);
+  l_views  t_views := t_views('V_$RESOURCE_LIMIT', 'V_$SESSION', 'V_$PARAMETER',
+                              'V_$INSTANCE', 'V_$DATABASE');
+  l_failed PLS_INTEGER := 0;
+BEGIN
+  BEGIN
+    EXECUTE IMMEDIATE 'GRANT SELECT_CATALOG_ROLE TO contoso';
+  EXCEPTION
+    WHEN OTHERS THEN IF SQLCODE <> -1031 THEN RAISE; END IF;
+  END;
+
+  FOR i IN 1 .. l_views.COUNT LOOP
+    BEGIN
+      EXECUTE IMMEDIATE 'GRANT SELECT ON sys.' || l_views(i) || ' TO contoso';
+    EXCEPTION
+      WHEN OTHERS THEN
+        IF SQLCODE <> -1031 THEN RAISE; END IF;
+        l_failed := l_failed + 1;
+    END;
+  END LOOP;
+
+  IF l_failed = 0 THEN
+    DBMS_OUTPUT.PUT_LINE('Granted SELECT on the V$ views to CONTOSO.');
+    RETURN;
+  END IF;
+
+  DBMS_OUTPUT.PUT_LINE(RPAD('=', 74, '='));
+  DBMS_OUTPUT.PUT_LINE('WARNING - the conversion tool will not run');
+  DBMS_OUTPUT.PUT_LINE('');
+  DBMS_OUTPUT.PUT_LINE(l_failed || ' of ' || l_views.COUNT || ' V$ grants could not be made from');
+  DBMS_OUTPUT.PUT_LINE('here. Only SYS can grant on SYS-owned views when');
+  DBMS_OUTPUT.PUT_LINE('O7_DICTIONARY_ACCESSIBILITY is FALSE, which it is on a stock image.');
+  DBMS_OUTPUT.PUT_LINE('');
+  DBMS_OUTPUT.PUT_LINE('scripts/seed-oracle.sh makes these grants for you straight after');
+  DBMS_OUTPUT.PUT_LINE('this file. If you are running the SQL by hand, do it yourself:');
+  DBMS_OUTPUT.PUT_LINE('');
+  DBMS_OUTPUT.PUT_LINE('  sqlplus -S -L / as sysdba');
+  DBMS_OUTPUT.PUT_LINE('  ALTER SESSION SET CONTAINER = FREEPDB1;');
+  DBMS_OUTPUT.PUT_LINE('  GRANT SELECT ON sys.v_$resource_limit TO contoso;');
+  DBMS_OUTPUT.PUT_LINE('');
+  DBMS_OUTPUT.PUT_LINE('Run it AFTER this file, never before: this script drops and');
+  DBMS_OUTPUT.PUT_LINE('recreates CONTOSO, which would discard the grant.');
+  DBMS_OUTPUT.PUT_LINE('');
+  DBMS_OUTPUT.PUT_LINE('Unlike the DBMS_RLS grant above, this one is not optional. Without');
+  DBMS_OUTPUT.PUT_LINE('it the extractor fails at pool initialisation with ORA-00942 and');
+  DBMS_OUTPUT.PUT_LINE('extracts nothing at all - you lose the entire conversion, not one');
+  DBMS_OUTPUT.PUT_LINE('hard case. The schema itself still builds, which is why this is a');
+  DBMS_OUTPUT.PUT_LINE('warning here and a hard error in seed-oracle.sh.');
+  DBMS_OUTPUT.PUT_LINE(RPAD('=', 74, '='));
+END;
+/
+
+--------------------------------------------------------------------------------
 -- Verification. Fails the script if anything above did not land.
 --------------------------------------------------------------------------------
 DECLARE

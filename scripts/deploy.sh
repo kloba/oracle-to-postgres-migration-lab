@@ -628,6 +628,28 @@ if [[ -n "$PG_SERVER" ]]; then
     fi
 fi
 
+# --------------------------------------------------------------------------
+# Create the extensions
+#
+# azure.extensions is an ALLOWLIST, not an installer, and ARM has no resource
+# that runs CREATE EXTENSION. Left here, both databases contain nothing but
+# plpgsql, and the first thing the conversion wizard tells you is that nine
+# recommended extensions are missing.
+#
+# The server has no public endpoint, so this only works from inside the VNet.
+# From a laptop it is expected to fail, and it is reported as a step to do
+# later rather than as a deployment failure.
+# --------------------------------------------------------------------------
+if [[ -n "$PG_SERVER" ]] && command -v psql >/dev/null 2>&1; then
+    hdr "Creating the extensions"
+    if "${SCRIPT_DIR}/install-pg-extensions.sh" >/dev/null 2>&1; then
+        ok "extensions created in both databases; plpgsql_check confirmed loaded"
+    else
+        info "could not reach ${PG_SERVER} from here - private access, as designed"
+        note "run scripts/install-pg-extensions.sh from the jumpbox, or over a tunnel"
+    fi
+fi
+
 printf '\n%s%sDeployment succeeded.%s Written to %s\n' "$C_BOLD" "$C_GREEN" "$C_RESET" "${OUTPUTS_JSON#"$REPO_ROOT"/}"
 cat <<EOF
 
@@ -637,7 +659,7 @@ cat <<EOF
     scripts/connect.sh oracle-azure    a SQL*Plus session through the Bastion tunnel
     scripts/connect.sh postgres        psql against the target flexible server
 
-  ${C_BOLD}Two manual steps this template deliberately does NOT do${C_RESET}
+  ${C_BOLD}Three manual steps this template deliberately does NOT do${C_RESET}
     The deployment is finished, but you cannot convert anything yet.
 
     1. Grant yourself the Foundry data-plane role. The account and model exist;
@@ -647,9 +669,20 @@ cat <<EOF
          MY_ID=\$(az ad signed-in-user show --query id -o tsv)
          az role assignment create --assignee "\$MY_ID" --role "Foundry User" --scope "\$FOUNDRY_ID"
          az role assignment create --assignee "\$MY_ID" --role "Cognitive Services OpenAI User" --scope "\$FOUNDRY_ID"
-       See docs/03-run-ai-migration.md for why there are two names.
+       This is not optional on a governed tenant even though the wizard offers
+       an API Key box. A policy named CognitiveServices_LocalAuth_Modify with a
+       modify effect rewrites disableLocalAuth to true whatever the template
+       asks for, and the key path then fails with "Key based authentication is
+       disabled for this resource". Choose Microsoft Entra Id in the wizard.
+       See docs/03-run-ai-migration.md.
 
-    2. RDP to the jumpbox through Bastion and install VS Code, the PostgreSQL
+    2. Create the extensions, if the step above could not reach the server:
+         scripts/install-pg-extensions.sh
+       Allowlisting is not installing. Until this runs, both databases contain
+       nothing but plpgsql and the wizard's Verify Extensions button will list
+       nine missing ones.
+
+    3. RDP to the jumpbox through Bastion and install VS Code, the PostgreSQL
        extension and GitHub Copilot. The jumpbox is a bare Windows Server 2022
        box on purpose - both sign-ins are interactive, so it cannot be
        provisioned unattended. See docs/01-deploy-infrastructure.md.

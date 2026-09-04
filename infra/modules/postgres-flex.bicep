@@ -49,6 +49,23 @@
 //
 // There is no ARM verb for "restart", so scripts/deploy.sh performs it after
 // the deployment and scripts/status.sh asserts isConfigPendingRestart is false.
+//
+// ALLOWLISTING IS NOT INSTALLING.
+//
+// azure.extensions only decides what a user is PERMITTED to create. It does not
+// run CREATE EXTENSION, and ARM has no resource that does. So a server that is
+// perfectly configured by this file still has nothing but plpgsql in either
+// database, and the conversion tool's "Verify Extensions" button says so:
+//
+//   The following recommended Azure Database for PostgreSQL extensions are not
+//   installed in database "migration_scratch": orafce, pg_partman, pgcrypto,
+//   postgis, postgis_tiger_geocoder, postgis_topology, tablefunc, uuid-ossp,
+//   pg_trgm
+//
+// That is a real message from a real run of this lab, and it is where tablefunc
+// came from: the tool asks for it by name and it was not on the allowlist at
+// all, so it could not have been installed even by hand. The CREATE EXTENSION
+// pass now lives in scripts/install-pg-extensions.sh, which deploy.sh runs.
 // -----------------------------------------------------------------------------
 
 targetScope = 'resourceGroup'
@@ -111,8 +128,8 @@ param databaseName string = 'contoso_store'
 @description('Name of the scratch database the conversion tool compiles converted objects into. It creates and drops _mig_scratch_ schemas here, so keep it separate from the migration target.')
 param scratchDatabaseName string = 'migration_scratch'
 
-@description('Value for the azure.extensions server parameter: the exact extension allowlist this lab needs. dblink is on the list because CONTOSO uses PRAGMA AUTONOMOUS_TRANSACTION, which converts to a dblink round trip, and it is needed on the target and not only on the scratch server.')
-param extensionsAllowlist string = 'orafce,uuid-ossp,pgcrypto,pg_trgm,postgis,postgis_topology,postgis_tiger_geocoder,pg_partman,pg_stat_statements,plpgsql_check,dblink'
+@description('Value for the azure.extensions server parameter: the exact extension allowlist this lab needs. dblink is on the list because CONTOSO uses PRAGMA AUTONOMOUS_TRANSACTION, which converts to a dblink round trip, and it is needed on the target and not only on the scratch server. tablefunc is on it because the conversion tool asks for it by name -- see the note below.')
+param extensionsAllowlist string = 'orafce,uuid-ossp,pgcrypto,pg_trgm,postgis,postgis_topology,postgis_tiger_geocoder,pg_partman,pg_stat_statements,plpgsql_check,dblink,tablefunc'
 
 @description('Value for shared_preload_libraries. Note the background worker is pg_partman_bgw, not pg_partman - the extension and its worker library have different names.')
 param sharedPreloadLibraries string = 'pg_partman_bgw,pg_stat_statements,plpgsql_check'
