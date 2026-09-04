@@ -1,148 +1,259 @@
-# Driving the conversion from a macOS client — what actually happened
+# Driving the conversion for real — what actually happened
 
-A record of running the VS Code PostgreSQL extension against this lab's Azure
-deployment on **2026-09-04**, from an Apple Silicon Mac. The screenshots referenced below sit
-beside this file.
+A record of running the VS Code PostgreSQL extension (`ms-ossdata.vscode-pgsql`)
+against this lab's Azure deployment on **2026-09-04**. The screenshots referenced
+below sit beside this file.
 
-It exists because `docs/lab-status.md` had two open questions that only doing it
-could answer: whether the extension works on ARM64 at all, and what the
-conversion actually asks for. Both are now answered. The conversion itself is
-still not finished, and this page says exactly where it stops.
+The earlier version of this page described a run that stopped at step 3 of the
+wizard and gave a *guess* about why. That guess was wrong, and it is corrected in
+§"What the earlier version of this page got wrong". This run went all the way
+through: every wizard step validated, a project created, **1,299 objects
+extracted from Oracle**, and the AI conversion executing against Microsoft
+Foundry.
 
-## The machine
+Four defects in this lab were found by doing it. All four are fixed in the repo;
+each is credited to the screenshot that exposed it.
+
+## The setup
 
 | | |
 |---|---|
-| Host | macOS 15.7.9, **arm64** (Apple Silicon) |
-| VS Code | 1.136.1 |
-| Extension | `ms-ossdata.vscode-pgsql` **1.30.0** |
-| Oracle source | the lab's Azure VM, `CONTOSO`, 1,855 objects, seeded at `--scale 0.01` |
+| Client | VS Code 1.136.1 on macOS 15.7.9 arm64, driving a **Remote-SSH** window |
+| Where the extension actually ran | the lab's Oracle VM — Ubuntu, x86-64, inside the VNet |
+| Extension build | `ms-ossdata.vscode-pgsql-1.30.1-linux-x64` |
+| Oracle source | `CONTOSO` on the Azure VM, 1,855 objects, seeded `--scale 0.01` |
+| Target | `o2p-pg-<uniq>.postgres.database.azure.com`, PG 16, private access |
+| Model | `gpt-5.2`, deployment `o2p-schema-conversion`, 500 kTPM |
 
-## ARM64 is not the blocker the docs feared
+**Remote-SSH is the trick worth stealing.** Neither VM has a public IP and the
+flexible server is private-access only, so from a laptop everything needs a
+tunnel. Open the *Oracle VM* as a Remote-SSH host instead and the extension host
+runs inside the VNet: Oracle is `localhost:1521`, the PostgreSQL FQDN resolves
+natively to its private address, and the platform question disappears because the
+remote is Linux x64. The status bar in every screenshot reads
+`SSH: o2p-oracle-vm` for exactly that reason.
 
-`docs/00-prerequisites.md` carries Microsoft's warning that the thick client is
-Windows and Linux x64 only, and that ARM64 is unsupported. Taken literally that
-reads as "do not try this on an Apple Silicon Mac".
+The one thing that stays on the Mac is the Microsoft sign-in, which opens the
+local browser. That is what you want.
 
-What actually happens:
+## The run, screenshot by screenshot
 
-- The marketplace serves a **`darwin-arm64`-specific build**. The extension
-  installs as `ms-ossdata.vscode-pgsql-1.30.0-darwin-arm64` and ships a native
-  macOS `pgsqltoolsservice`.
-- All **7 migration commands** and the `pg-migrations` view are present in that
-  build. Nothing is gated out.
-- The **Migrations** panel renders, `+ Create Migration Project` works, and the
-  wizard runs — screenshots 01, 02, 05.
-- The extension **connected to the Azure Oracle VM and enumerated its schemas**
-  — screenshot 03, "Oracle connection successful", with `CONTOSO` listed.
+### 1. Oracle connects — `01-oracle-connected.png`
 
-So the platform warning did not stop the client running. That is not the same as
-Microsoft supporting it, and this is one machine on one day — but "ARM64 is
-risky" was doing more work in our docs than the evidence justifies.
+`localhost` / `1521` / `FREEPDB1` / `CONTOSO`, then **Load Schemas** →
+*Oracle connection successful*. `02-schemas-contoso.png` shows the schema picker
+offering `CONTOSO` and `PUBLIC`.
 
-## Reaching a private lab from a laptop
+### 2. Verify Extensions fails — `03-extensions-missing.png` → **defect 1**
 
-Both targets are deliberately unreachable from the internet: neither VM has a
-public IP, and PostgreSQL is private-access only. A laptop client therefore
-needs tunnels, which the jumpbox would not:
+The scratch-database step has a **Verify Extensions** button. Against a server
+whose `azure.extensions` allowlist and `shared_preload_libraries` were both
+configured exactly as `docs/01-deploy-infrastructure.md` describes, it said:
 
-```bash
-# Bastion to the Oracle VM's SSH, then forward Oracle and PostgreSQL out of the VNet
-az network bastion tunnel --name o2p-bastion --resource-group o2p-migration-lab-rg \
-  --target-resource-id "$(jq -r .oracleVmId generated/outputs.json)" \
-  --resource-port 22 --port 2222 &
+> The following recommended Azure Database for PostgreSQL extensions are not
+> installed in database "migration_scratch": orafce, pg_partman, pgcrypto,
+> postgis, postgis_tiger_geocoder, postgis_topology, tablefunc, uuid-ossp,
+> pg_trgm
 
-ssh -i generated/ssh/o2p-lab_ed25519 -p 2222 -N \
-  -L 15210:localhost:1521 \
-  -L 15432:"$(jq -r .postgresFqdn generated/outputs.json)":5432 \
-  azureuser@127.0.0.1 &
+Two separate faults behind one message:
+
+- **Allowlisting is not installing.** `azure.extensions` decides what you are
+  *permitted* to create. Nothing runs `CREATE EXTENSION`, and ARM has no resource
+  that does — `SELECT extname FROM pg_extension` returned exactly one row,
+  `plpgsql`, in both databases.
+- **`tablefunc` was not on the allowlist at all**, so it could not have been
+  installed even by hand.
+
+Fixed by `scripts/install-pg-extensions.sh` (new), plus `tablefunc` added to
+`infra/modules/postgres-flex.bicep`. `04-extensions-verified.png` is the same
+button afterwards: **✓ Extensions Verified**.
+
+A detail that cost a few minutes: `fuzzystrmatch` cannot be allowlisted by name
+on Azure — a direct `CREATE EXTENSION fuzzystrmatch` is refused — but `CASCADE`
+pulls it in as a dependency of `postgis_tiger_geocoder`, which Azure permits. The
+script uses `CASCADE` throughout.
+
+**A third fault the same check exposed.** With extensions installed, the running
+server still reported
+
+```text
+shared_preload_libraries = pg_cron,pg_stat_statements,azure,pg_qs,…
 ```
 
-The wizard then takes `127.0.0.1` / `15210` for Oracle. That is the whole reason
-`CLIENT_PLATFORM=jumpbox` is the documented default: on the jumpbox, inside the
-VNet, none of this is necessary.
+— no `plpgsql_check`, no `pg_partman_bgw`, on a server ARM described as
+`isConfigPendingRestart: true`. `deploy.sh` performs that restart and `status.sh`
+asserts the ARM flag, and yet the live server had never loaded the library. That
+is the lab's own fail-open trap, one level up: **ARM's answer is not the
+server's.** `install-pg-extensions.sh` now finishes by asking the server itself,
+`SHOW shared_preload_libraries`.
 
-## What the wizard asks for
+### 3. The API Key box is a trap — `05-apikey-disabled.png` → **defect 2**
 
-Step 1 states its own prerequisites (screenshot 01):
+The Foundry step offers **API Key** and **Microsoft Entra Id**. API Key looks
+easier. It cannot work here:
 
-- connection details for the source database
-- name of the schema(s) to convert
-- **endpoint URL and key for a Microsoft Foundry resource**
-- **connection name for an existing Azure Database for PostgreSQL instance**
+> Azure OpenAI connection test failed: Key based authentication is disabled for
+> this resource.
 
-Step 2, *Connect to Oracle* (02, 03): hostname, port, SID/service, username,
-password, schemas, plus a **Load Schemas** button that performs a real
-connection.
+`infra/modules/foundry.bicep` asks for `disableLocalAuth: false`. The deployed
+resource read `true`, and `az resource update --set
+properties.disableLocalAuth=false` came straight back as `true` — the write was
+accepted and silently reverted. The reason is visible in policy state:
 
-Step 3, *Choose an Azure Database for PostgreSQL scratch database* (04), is
-where a laptop run gets interesting. It says plainly:
+```bash
+az policy state list --resource "$FOUNDRY_ID" \
+  --query "[].{policy:policyDefinitionName, effect:policyDefinitionAction}" -o table
+```
 
-> Only Azure Database for PostgreSQL is supported for this step. Select an
-> existing Azure Database for PostgreSQL connection to continue.
+```text
+CognitiveServices_LocalAuth_Modify    modify    Compliant
+```
 
-It wants a **saved connection profile**, not a host and port, and it offers a
-**Verify Extensions** button — the check that decides whether `plpgsql_check` is
-actually usable. `Next: Microsoft Foundry Model Configuration` stays disabled
-until a connection and database are chosen.
+A tenant policy with a **`modify`** effect rewrites the property on every write.
+Nothing in the deployment output says so. Switching to **Microsoft Entra Id**,
+signing in and selecting the tenant turns the same Test button green —
+`06-foundry-entra-ok.png` — and that is also the only path that consults the
+`Cognitive Services OpenAI User` role the docs tell you to grant. With API Key
+the role is never used.
 
-That Verify Extensions button is worth pausing on. `plpgsql_check` fails **open**:
-if it is not loaded, the converter skips its deeper validation and the report
-still looks clean. The infrastructure audit found the template was leaving it
-allowlisted but *not loaded*, because `shared_preload_libraries` is a static
-parameter and ARM cannot restart the server — `scripts/deploy.sh` now performs
-that restart and `scripts/status.sh` asserts it. Run Verify Extensions before
-trusting any conversion report.
+`07-project-created.png` is the project page that follows: **Schema Migration**,
+**Schema Review**, **Application Migration (Preview)**, and the project written to
+`~/.github/postgres-migrations/contoso-conversion/`.
 
-## Where this stops, and why — diagnosed, not assumed
+### 4. Extraction Failed, with nothing on screen to say why — `08-extraction-failed.png` → **defect 3**
 
-**Not done: the conversion itself.** The run reaches step 3 and stops there. The
-first write-up of this guessed at the reason; here is what actually blocks it.
+Clicking **Migrate** produced a red banner reading, in full, *Extraction Failed*.
+No detail, no log link. The reason was in
+`artifacts/oracle/CONTOSO/extract/internal/logs/extraction.log`:
 
-A tunnelled PostgreSQL connection **does work**. A profile pointing at
-`postgresql://o2padmin@127.0.0.1:15432/migration_scratch?sslmode=require` passes
-the extension's own **Test Connection**, saves, connects, and browses — the
-sidebar lists its Databases, Roles and Tablespaces against the real Azure server.
-So "the tunnel is not good enough" was wrong.
+```text
+ossdbtoolsservice…extractor.oracle.connection_pool, in auto_detect_workers →
+get_available_sessions
+oracledb.exceptions.DatabaseError: ORA-00942: table or view
+"SYS"."V_$RESOURCE_LIMIT" does not exist
+Extraction … complete in 0m 0s: 0 extracted, 0 failed, 0 excluded
+```
 
-The wizard still will not offer it. `POSTGRESQL CONNECTION` stays empty and
-`Refresh Profiles` spins on *Loading…* indefinitely. The reason is in the
-extension's own bundle: `dist/extension.js` references `listFlexibleServers`,
-`armEndpoint`, `subscriptionId`, `getSubscriptions`, `azureResourceService` and
-`azureAccount`. **That step enumerates Azure Database for PostgreSQL flexible
-servers through Azure Resource Manager** — it lists *subscription resources*, not
-local connection profiles. A profile you typed in by hand has no ARM identity, so
-it can never appear there however well it connects.
+Before it enumerates a single object the extractor sizes its Oracle connection
+pool by asking `V$RESOURCE_LIMIT` how many sessions are free. `CONTOSO` could not
+read it, so the pool never initialised and the run ended having done nothing.
 
-Which makes the gate an **interactive Azure sign-in inside VS Code**, consistent
-with the AZURE DEPLOYMENTS panel reading "No Azure Deployments" and with no Azure
-auth in VS Code's global storage. The same applies to GitHub Copilot (Pro+,
-Business or Enterprise) for the review queue. Both are browser OAuth flows.
+This is not in Microsoft's prerequisite list, and `src/oracle/00-user-tablespace.sql`
+did not grant it. One `SYSDBA` statement fixed it:
 
-The practical consequence for this lab: **sign in to Azure in VS Code before
-opening the wizard**, and prefer the jumpbox, where the servers are ARM-visible
-and no tunnelling is involved at all.
+```sql
+GRANT SELECT ON sys.v_$resource_limit TO contoso;   -- v_$, not v$: no granting on a synonym
+```
 
-So every prediction in `docs/design.md` about which of the 44 hard cases survive
-conversion **remains a prediction**. Nothing here changes that.
+The same **Migrate** button then produced:
+
+```text
+Enumerated 1445 valid, 0 invalid objects
+Discovery complete: 1260 extractable, 185 excluded, 0 invalid, 7 unsupported types
+Created 27 batches for 1260 objects, workers=5
+Extraction … complete in 2m 50s: 1299 extracted, 0 failed, 185 excluded
+```
+
+Worth knowing: `V$RESOURCE_LIMIT` returns **zero rows inside a PDB** — it is a
+CDB-level view. That is fine. The extractor logs `Auto-detected workers: 5
+(sessions: 0/0, available: 0)` and carries on. The missing privilege was fatal;
+the empty result is not.
+
+`scripts/seed-oracle.sh` now makes this grant as `SYSDBA` straight after
+`00-user-tablespace.sql`, and reports a failure there as a hard error rather than
+the skip it uses for the optional `DBMS_RLS` grant — losing this one costs you the
+whole conversion, not one hard case.
+
+## What the conversion actually did
+
+With extraction fixed, the AI conversion ran against Foundry for real. From
+`convert/sessions/<id>/internal/logs/conversion.log`:
+
+- **56 chunks**, 1,299 objects, `workers=5` for extraction and up to **23 chunks
+  in flight** for conversion under an AIMD window.
+- **Zero `[ERROR]` lines** across the whole run.
+- Package-aware conversion: `Package PKG_ERROR converted: 3/3 members converted,
+  0 skipped, 0 failed`, with spec stubs removed before body reassembly.
+- A compile-and-fix loop that is genuinely a loop:
+  `Fix attempt 1/8 recompile CONTOSO.PROCEDURE.SP_GEN_RULE_APPLY_001: OK (PG 0.015s)`
+  → `Fixed … on attempt 1`.
+- Honest self-reporting of its own estimator:
+  `chunk-006: token estimate drift 283% (est=5713, actual_prompt=21875)`.
+
+**It is much slower than this lab's docs claim.** `docs/design.md` predicts 45–90
+minutes. Roughly a quarter of the chunks were done at the 50-minute mark, which
+extrapolates to something like three hours for this schema. Where the time goes is
+visible in `pg_stat_activity` on the scratch database:
+
+```text
+state                 wait_event   count  longest
+idle in transaction   ClientRead      17  00:14:49
+active                transactionid    1  00:00:08
+```
+
+Seventeen workers each holding an open transaction while their LLM call is in
+flight, and one blocked on `CREATE TYPE _mig_scratch_contoso.…` behind a peer.
+The tool copes — it logs `Cycle deadlock: releasing…` and retries — but on a
+1,299-object schema with one scratch database it spends a lot of wall-clock there.
+
+**One caveat, stated rather than buried:** `install-pg-extensions.sh` was run
+against `migration_scratch` *while the conversion was live*, and the first
+`canceling statement due to lock … in relation "pg_proc"` appears about four
+minutes later. Creating thirteen extensions under a running converter is a
+plausible contributor to the lock contention above. Install the extensions
+before you start the wizard, which is what `deploy.sh` now does.
+
+## What the earlier version of this page got wrong
+
+Worth recording, because both errors were confident and both were wrong.
+
+**"A tunnelled PostgreSQL profile will never be offered."** The claim was that
+the scratch step enumerates flexible servers through Azure Resource Manager, so a
+hand-entered profile could not appear. It cited `listFlexibleServers`,
+`getSubscriptions` and `azureResourceService` in the extension bundle. Those
+strings are real; the conclusion was not. The step lists **saved connection
+profiles**, and the test it applies is a hostname suffix:
+
+```js
+function tm(r){return r?.trim().toLowerCase().endsWith(".postgres.database.azure.com")===!0}
+```
+
+A profile created through `PGSQL: Connect` with the real FQDN — reachable because
+the remote sits inside the VNet — appeared in the dropdown immediately, and the
+dialog even grew an **AZURE METADATA** panel recognising it as an Azure resource.
+What defeated the earlier attempt was pointing a profile at `127.0.0.1:15432`:
+that connects fine, and can never satisfy the suffix test.
+
+**"The gate is an interactive Azure sign-in."** Half right, for the wrong reason.
+No Azure sign-in is needed to *select the scratch database*. One is needed for the
+**Foundry** step, and only because key-based auth is policy-disabled (defect 2).
 
 ## Reproducing this
 
 1. `./scripts/deploy.sh` then `./scripts/seed-oracle.sh --azure --scale 0.01`.
-2. Install VS Code and `ms-ossdata.vscode-pgsql`.
-3. Open the tunnels above, or better, do the whole thing from the jumpbox.
-4. `PostgreSQL: Focus on Migrations View` → `+ Create Migration Project`.
-5. Oracle: `127.0.0.1`, `15210`, `FREEPDB1`, `CONTOSO`, schema `CONTOSO`.
-6. Foundry endpoint and key:
-   ```bash
-   jq -r .foundryEndpoint generated/outputs.json
-   az cognitiveservices account keys list -g o2p-migration-lab-rg \
-     -n "$(jq -r .foundryAccountName generated/outputs.json)" --query key1 -o tsv
-   ```
+2. `./scripts/install-pg-extensions.sh` — before opening the wizard.
+3. Grant yourself `Cognitive Services OpenAI User` on the Foundry account.
+4. Add the Oracle VM as a Remote-SSH host and install the extension **in the
+   remote**, or use the Windows jumpbox, which is the documented path.
+5. `PostgreSQL: Focus on Migrations View` → `+ Create Migration Project`.
+6. Oracle `localhost` / `1521` / `FREEPDB1` / `CONTOSO`, schema `CONTOSO`.
+7. `PGSQL: Connect` to the **real** `*.postgres.database.azure.com` FQDN, database
+   `migration_scratch`, then **Refresh Profiles** in the wizard.
+8. Foundry: endpoint from `generated/outputs.json`, **Microsoft Entra Id**, your
+   account and tenant.
+
+## The two macOS screenshots
+
+`macos-arm64-01-wizard-step-1.png` and `macos-arm64-02-migrations-view.png` are
+from a separate session on the Mac itself, kept as the evidence for
+`docs/lab-status.md` §3.9: the marketplace serves a **`darwin-arm64`** build, it
+installs and activates, all 7 migration commands and the `pg-migrations` view are
+present, and the wizard runs. That answers "does it launch on Apple Silicon". It
+is not a support statement, and it is not how this conversion was run.
 
 ## A note on the screenshots
 
-Cropped to the VS Code window to keep the macOS menu bar and Dock — meeting
-reminders, notification badges, installed apps — out of a public repository. The
-shell prompt showing a hostname survives in two of them. Check any screenshot you
-add here the same way before committing it.
+All are cropped to the VS Code window, which keeps the macOS menu bar, the Dock,
+notification badges and meeting reminders out of a public repository. One earlier
+screenshot leaked a machine hostname in a terminal prompt and had to be recropped.
+Check anything you add here the same way before committing it.

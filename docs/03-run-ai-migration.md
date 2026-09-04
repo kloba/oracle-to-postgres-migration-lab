@@ -232,6 +232,29 @@ az role assignment list --assignee "$(az ad signed-in-user show --query id -o ts
 Capacity: the lab asks for 500,000 TPM (`foundryModelCapacity: 500`). Below that the tool spends its
 time in retry backoff on a schema this size. It still finishes; it is just a miserable afternoon.
 
+**The authentication method, and why the API Key box may be a trap.** The wizard's *Choose a
+Microsoft Foundry Model* step offers **API Key** and **Microsoft Entra Id**. API Key looks like the
+easy path — the key is one `az` call away — but on a governed tenant it cannot work at all:
+
+```
+Azure OpenAI connection test failed: Key based authentication is disabled for this resource.
+```
+
+`infra/modules/foundry.bicep` asks for `disableLocalAuth: false`. The deployed resource came back
+`true` anyway, and re-setting it through ARM silently had no effect. The reason is a policy
+assignment, which you can see for yourself:
+
+```bash
+az policy state list --resource "$(jq -r .foundryAccountId generated/outputs.json)" \
+  --query "[].{policy:policyDefinitionName, effect:policyDefinitionAction}" --output table
+```
+
+On the tenant this lab was built against that lists `CognitiveServices_LocalAuth_Modify` with a
+**`modify`** effect: it rewrites `disableLocalAuth` to `true` on every write, so the template never
+gets the last word and nothing in the deployment output says so. **Choose Microsoft Entra Id**,
+select your account and tenant, and the same Test button turns green. That is also the path the role
+assignment above exists for — with API Key the role is never consulted.
+
 ### 3.2 Oracle source
 
 The tool reads **metadata only**. It never writes to Oracle and needs no privilege on application
@@ -243,6 +266,30 @@ tables. `O2P_READER` holds exactly:
   empty, which the tool reports as "no parameters" rather than as an error
 
 Oracle's `sessions` parameter must be greater than 10; the extension opens parallel metadata reads.
+
+**And it must be able to read `V$RESOURCE_LIMIT`.** This one is not in Microsoft's prerequisite
+list and it is the difference between a conversion and a blank screen. Before the extractor
+enumerates a single object it sizes its connection pool by asking how many sessions are free, in
+`connection_pool.auto_detect_workers()`. Without the privilege that query raises
+
+```text
+ORA-00942: table or view "SYS"."V_$RESOURCE_LIMIT" does not exist
+```
+
+the pool never initialises, and the UI says only **Extraction Failed** — the run ends `0 extracted,
+0 failed, 0 excluded` and the reason is buried in
+`artifacts/oracle/<SCHEMA>/extract/internal/logs/extraction.log`. That is exactly how the first real
+run of this lab failed. `scripts/seed-oracle.sh` now makes the grant as `SYSDBA` straight after
+`00-user-tablespace.sql`; by hand it is:
+
+```sql
+ALTER SESSION SET CONTAINER = FREEPDB1;
+GRANT SELECT ON sys.v_$resource_limit TO contoso;   -- v_$, not v$: you cannot grant on a synonym
+```
+
+The view returns **zero rows inside a PDB** — it is a CDB-level view. That is fine. The extractor
+logs `Auto-detected workers: 5 (sessions: 0/0, available: 0)` and carries on. It is the missing
+privilege that is fatal, not the empty result.
 
 From the jumpbox the Oracle VM is directly reachable on the VNet at `10.42.1.10:1521`, service
 `FREEPDB1`. From your own machine, open a tunnel and point the extension at `localhost`:
@@ -291,6 +338,27 @@ The tool creates and drops schemas named `_mig_scratch_*` in the scratch databas
 running conversions against the same scratch database at the same time will interfere with each
 other. If you are sharing a lab, that is the one case that justifies a second server — and it needs
 the same allowlist and the same preload libraries, especially `plpgsql_check`.
+
+**Allowlisting is not installing.** `azure.extensions` decides what you are *permitted* to create.
+Nothing in the template runs `CREATE EXTENSION`, and ARM has no resource that does, so a correctly
+deployed server still contains nothing but `plpgsql`. The wizard's **Verify Extensions** button is
+where you find out:
+
+> The following recommended Azure Database for PostgreSQL extensions are not installed in database
+> "migration_scratch": orafce, pg_partman, pgcrypto, postgis, postgis_tiger_geocoder,
+> postgis_topology, tablefunc, uuid-ossp, pg_trgm
+
+Run the installer before you open the wizard, and it turns into **✓ Extensions Verified**:
+
+```bash
+./scripts/install-pg-extensions.sh              # from the jumpbox
+PGHOST=127.0.0.1 PGPORT=15432 ./scripts/install-pg-extensions.sh   # over a tunnel
+```
+
+That script also does the one check `deploy.sh` and `status.sh` cannot: it asks the *running server*
+`SHOW shared_preload_libraries` rather than asking ARM whether a restart is pending. ARM is not the
+server, and `plpgsql_check` fails open — if it is not in memory the converter skips its deeper
+validation silently and the report looks clean.
 
 ---
 

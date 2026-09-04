@@ -454,6 +454,33 @@ you get the silent skip described above. `./scripts/status.sh` exits non-zero if
 ./scripts/status.sh
 ```
 
+**Now install them, because the allowlist has not.** `azure.extensions` says what you are
+*permitted* to create. Nothing in the template runs `CREATE EXTENSION`, and ARM has no resource that
+does, so both databases still contain nothing but `plpgsql`. Run:
+
+```bash
+./scripts/install-pg-extensions.sh                                  # from the jumpbox
+PGHOST=127.0.0.1 PGPORT=15432 ./scripts/install-pg-extensions.sh    # over a tunnel
+```
+
+`deploy.sh` attempts this for you and reports it as a step to do later when it cannot reach the
+server, which from a laptop is the normal case: the flexible server is private-access only.
+
+Two details worth knowing before you run it. `fuzzystrmatch` cannot be allowlisted by name on Azure
+— a direct `CREATE EXTENSION fuzzystrmatch` is refused — but `CASCADE` pulls it in as a dependency
+of `postgis_tiger_geocoder`, which Azure does permit, so the script uses `CASCADE` throughout. And
+the script finishes by asking the *running server* `SHOW shared_preload_libraries` rather than asking
+ARM whether a restart is pending, because ARM is the control plane's opinion and `plpgsql_check`
+fails open.
+
+On a real run of this lab, the wizard's **Verify Extensions** button reported nine missing —
+`orafce, pg_partman, pgcrypto, postgis, postgis_tiger_geocoder, postgis_topology, tablefunc,
+uuid-ossp, pg_trgm` — against a server whose allowlist and preload libraries were both configured
+exactly as this page describes. `tablefunc` was not even on the allowlist, so it could not have been
+installed by hand either; it is on it now. Note that `plpgsql_check` was *not* in that list even
+though it was not installed at the time, which is consistent with the Learn page's claim that the
+tool installs it on the scratch database itself.
+
 ### 6.2 Grant yourself the Foundry data-plane role
 
 Creating a Foundry account does not give you permission to call it.
@@ -470,6 +497,21 @@ az role assignment create --assignee "$MY_ID" --role "Foundry User" --scope "$FO
 The two role names are the unresolved upstream conflict described in
 [00 — Prerequisites](00-prerequisites.md#5-permissions). Grant whichever your tenant offers; grant
 both if both exist. Allow a minute or two for propagation.
+
+**This is not optional, even though the wizard offers an API Key box.** On a governed tenant the
+key path cannot work at all — the model step fails with *"Key based authentication is disabled for
+this resource"* — because a policy assignment rewrites `disableLocalAuth` to `true` on every write,
+whatever `infra/modules/foundry.bicep` asks for. Check yours:
+
+```bash
+az policy state list --resource "$FOUNDRY_ID" \
+  --query "[].{policy:policyDefinitionName, effect:policyDefinitionAction}" --output table
+```
+
+On the tenant this lab was built against that lists `CognitiveServices_LocalAuth_Modify` with a
+`modify` effect. Choose **Microsoft Entra Id** in the wizard instead — which is the only path that
+consults the role you just granted. See
+[03 — Run the AI migration](03-run-ai-migration.md#31-foundry).
 
 ### 6.3 Copy the deployment outputs into `.env`
 

@@ -1,6 +1,6 @@
 # Lab status — what is verified and what is not
 
-**Last updated: 2026-09-02.**
+**Last updated: 2026-09-04.**
 
 This document exists so you know how much to trust the rest of this repository. It separates
 **what has actually been executed and observed** from **what has only been written down**. Where
@@ -9,12 +9,14 @@ those two disagree, this page records the disagreement rather than smoothing it 
 Read this before you spend money.
 
 > **The short version.** The Oracle side of this lab is real and proven: the schema builds, it is
-> large, it is valid, and it contains the hard cases it claims to. The **Azure side has now been
-> deployed for real once, and destroyed** (2026-09-02): the infrastructure stands up, the deployed
-> resources match what the docs claim, and teardown removes the resource group cleanly. But the
-> **AI conversion has never been run**, the Oracle VM was never driven through to a working
-> database, and **no data has ever been migrated**. Every prediction in `docs/design.md` about how
-> the converter will behave is still a prediction, not an observation.
+> large, it is valid, and it contains the hard cases it claims to. The Azure side has been deployed,
+> verified and destroyed. And as of **2026-09-04 the AI conversion has been run for real**: the
+> wizard was driven end to end, all four connections validated against live resources, **1,299
+> objects were extracted from Oracle**, and the conversion executed against the deployed `gpt-5.2`
+> model. Doing it found **four defects in this lab**, all now fixed — see §1.10. What is still
+> unfinished: the conversion had not produced its final report at the time of writing, **no data has
+> been migrated**, and every per-case prediction in `docs/design.md` remains a prediction.
+
 
 ---
 
@@ -194,7 +196,62 @@ schema and never re-measured. §7 warns about a status page that only ever gains
 one that keeps red marks it has already fixed is just as untrustworthy.
 
 **Still true, and not fixed by any of this:** these are assertions about the *Oracle* side. Nothing
-here says anything about the conversion, which has still never run (§2.2).
+here says anything about the conversion. For that, see §1.10.
+
+### 1.10 The conversion was driven end to end, and found four defects (2026-09-04)
+
+On 2026-09-04 the `ms-ossdata.vscode-pgsql` wizard was driven through every step against the live
+deployment. The full account, with screenshots, is in
+[docs/images/screenshots/](images/screenshots/README.md); this is the summary.
+
+**How, and why it matters.** Not from the jumpbox and not from the Mac, but from a **VS Code
+Remote-SSH window onto the Oracle VM**, with the extension installed in the remote
+(`ms-ossdata.vscode-pgsql-1.30.1-linux-x64`). The extension host then runs *inside the VNet*: Oracle
+is `localhost:1521`, the PostgreSQL FQDN resolves to its private address, no tunnelling is involved
+in the wizard at all, and the remote is Linux x64 so the platform question does not arise. This is
+a genuinely better path than either documented option for anyone on a Mac, and it is now written up.
+
+**What was observed working:**
+
+| Step | Result |
+| --- | --- |
+| Oracle connection + **Load Schemas** | *Oracle connection successful*; `CONTOSO` and `PUBLIC` listed |
+| Scratch database + **Verify Extensions** | *✓ Extensions Verified*, after defect 1 was fixed |
+| Foundry + **Test Connection** | green, using **Microsoft Entra Id**, after defect 2 was diagnosed |
+| **Create Migration Project** | project written to `~/.github/postgres-migrations/contoso-conversion/` |
+| DDL extraction | **1,299 extracted, 0 failed, 185 excluded, 7 unsupported types, in 2m 50s**, after defect 3 was fixed |
+| AI conversion | executing against `gpt-5.2` with **zero `[ERROR]` lines**; package-aware; a real compile-and-fix loop |
+
+**The four defects, all fixed:**
+
+1. **Allowlisting is not installing.** `azure.extensions` and `shared_preload_libraries` were
+   configured exactly as documented, and both databases still contained nothing but `plpgsql`.
+   The tool's own **Verify Extensions** button named nine missing extensions. `tablefunc` was not
+   even on the allowlist, so it could not have been installed by hand. Fixed by
+   `scripts/install-pg-extensions.sh` (new, called by `deploy.sh`) and a `tablefunc` addition to
+   `infra/modules/postgres-flex.bicep`.
+2. **`plpgsql_check` was configured but not loaded on the live server**, which is this lab's own
+   fail-open trap one level up: `deploy.sh` restarts and `status.sh` asserts, but both ask **ARM**,
+   and ARM is not the server. `SHOW shared_preload_libraries` on the running server did not list it.
+   `install-pg-extensions.sh` now asks the server directly.
+3. **The Foundry API-key path cannot work on a governed tenant.** The wizard offers it, the template
+   asks for `disableLocalAuth: false`, and a policy assignment named
+   `CognitiveServices_LocalAuth_Modify` with a **`modify`** effect rewrites it to `true` on every
+   write — including a direct `az resource update`, which reported success and changed nothing. The
+   docs now lead with **Microsoft Entra Id**.
+4. **`CONTOSO` could not read `V$RESOURCE_LIMIT`, and that alone killed the conversion.** The
+   extractor sizes its Oracle connection pool from that view *before* enumerating anything, so
+   without the grant it raised `ORA-00942` and the run ended `0 extracted, 0 failed, 0 excluded`
+   behind a UI banner that said only *Extraction Failed*. `scripts/seed-oracle.sh` now makes the
+   grant as `SYSDBA`, and treats a failure as a hard error rather than a skip.
+
+**What this run does NOT establish.** It had not produced its final conversion report at the time of
+writing, so the per-case predictions in `docs/design.md` §9 are still predictions (§2.2). No data was
+migrated (§2.3). And the timing claim is now known to be optimistic rather than merely unverified:
+roughly a quarter of the 56 chunks were complete at the 50-minute mark, against a documented estimate
+of 45–90 minutes for the whole thing. `pg_stat_activity` shows why — seventeen workers each holding
+an open transaction while their LLM call is in flight, serialising on catalog locks in the one
+scratch database.
 
 ---
 
@@ -225,23 +282,25 @@ later renamed it to `outputs.json.stale` — so the Bicep output names the scrip
 than the old static consistency check, but it is still not evidence that `connect.sh`, `status.sh`,
 or a seed against the VM works.
 
-### 2.2 The AI conversion itself. Never run.
+### 2.2 The conversion's *results*. Still unobserved.
 
-**No conversion has ever been performed with this schema.** The Foundry deployment now provably
-*exists* (§1.7), but it has never been *called*. Specifically untested:
+The conversion itself has now been run (§1.10) — this section is no longer "never run", but almost
+everything downstream of "it started converting" is still open:
 
-- The `ms-ossdata.vscode-pgsql` extension against this source. It has to be driven interactively
-  from the jumpbox in VS Code, and nobody has logged into the jumpbox to do it.
-- Whether the deployed `gpt-5.2` model actually *serves* a conversion. It deployed with 500,000 TPM
-  capacity and `provisioningState` Succeeded (§1.7); that is not the same as having converted a
-  single object.
-- The scratch-database compile step and `plpgsql_check` validation. The allowlist and preload
-  library are confirmed present on the live server (§1.7); the tool that consumes them never ran.
-- GitHub Copilot agent mode on the review-task queue.
+- **The final conversion report.** At the time of writing the run had converted 263 of 1,299 objects
+  with 0 failures and had not produced its report. Until it does, nothing here says how much of this
+  schema converts cleanly.
 - **Every prediction in `docs/design.md` section 9** — the "10 clean, 21 partial, 12 review task"
-  split and all 43 per-case predictions are reasoned guesses. **Zero have been observed.** The
-  README says observation beats prediction; as of today there are no observations.
-- The claimed 45–90 minute conversion time and the $5–30 token cost.
+  split and all 43 per-case predictions. **Zero have been checked against a report.**
+- **The `plpgsql_check` validation pass.** The extension is now confirmed installed *and loaded* on
+  the live server (§1.10), and **Verify Extensions** passes, but no report has been read that shows
+  what it caught.
+- **Schema Review (step 2) and Application Migration (step 3).** Both were visible in the project
+  page and neither was run.
+- **GitHub Copilot agent mode on the review-task queue.** Never exercised.
+- **The token cost.** $2.97 at the 50-minute mark for a quarter of the work, against a documented
+  $5–30 for the whole run. That is at least the right order of magnitude, but it is not a final
+  number.
 
 ### 2.3 Data migration and validation. Never run.
 
@@ -322,29 +381,37 @@ so it is the documented local default. The official image works locally too, and
 disproves an earlier claim here that a login was required. Both are Oracle Free 23ai; the
 conversion itself has still never been run against either (§2.2).
 
-### 3.9 ARM64 / Apple Silicon — partially resolved (2026-09-04)
+### 3.9 ARM64 / Apple Silicon — resolved, and the earlier diagnosis here was wrong (2026-09-04)
 
 The client half of the ARM64 worry is answered: the marketplace serves a
 **`darwin-arm64` build** of `ms-ossdata.vscode-pgsql` (1.30.0), it installs and
 activates on macOS 15.7.9 arm64, all 7 migration commands and the `pg-migrations`
-view are present, the wizard runs, and it **connected to the Azure Oracle VM and
-enumerated `CONTOSO`** through a Bastion tunnel. Evidence and screenshots:
+view are present, and the wizard runs. Screenshots:
 [docs/images/screenshots/](images/screenshots/README.md).
 
-Unchanged: this is one machine on one day, and it is not a support statement.
-The jumpbox remains the documented path, and it avoids the tunnelling a laptop
-needs, since neither VM has a public IP and PostgreSQL is private-access only.
+The conversion itself was **not** run that way, and does not need to be. It was
+driven from a **Remote-SSH window onto the Oracle VM**, where the extension host
+is Linux x64 inside the VNet — which sidesteps the platform question and the
+tunnelling in one move. See §1.10.
 
-Still NOT resolved: the conversion itself has still never been run, and the
-blocker is now diagnosed rather than guessed. A tunnelled PostgreSQL profile
-DOES work — it passes the extension's Test Connection, saves, connects and
-browses the real Azure server. The wizard still will not list it, because the
-scratch step enumerates flexible servers through **Azure Resource Manager**
-(`getSubscriptions` / `listFlexibleServers` / `azureResourceService` in the
-extension bundle), so it shows subscription resources, not hand-entered
-profiles. The gate is therefore an **interactive Azure sign-in inside VS Code**,
-plus GitHub Copilot for the review queue — both browser OAuth flows. Every
-hard-case prediction in `docs/design.md` remains a prediction.
+**This entry used to give a confident and incorrect reason for the wizard
+refusing a tunnelled PostgreSQL profile.** It claimed the scratch step enumerates
+flexible servers through Azure Resource Manager, citing `listFlexibleServers`,
+`getSubscriptions` and `azureResourceService` in the extension bundle. Those
+strings are real; the conclusion was not. The step lists **saved connection
+profiles** and filters them on a hostname suffix:
+
+```js
+function tm(r){return r?.trim().toLowerCase().endsWith(".postgres.database.azure.com")===!0}
+```
+
+A profile pointed at the **real** `*.postgres.database.azure.com` FQDN appears in
+the dropdown at once — the connection dialog even grows an *Azure metadata* panel
+recognising it. A profile pointed at `127.0.0.1:15432` connects perfectly and can
+never pass that test, which is what actually blocked the earlier attempt. The
+second claim, that the gate was an interactive Azure sign-in, was half right for
+the wrong reason: no sign-in is needed to pick the scratch database; one is needed
+for **Foundry**, and only because key auth is policy-disabled (§1.10, defect 3).
 
 ### 3.4 Unused `.env.example` variables — resolved
 
@@ -416,9 +483,11 @@ back into the repo. Redact both before pasting preflight output into an issue or
 | Run the repo's static checks and CI | **Yes.** All 8 pass, and pass under CI's `--strict` (§1.1) |
 | Run the repo's full Oracle test suite and see it green | **Yes.** 10/10 checks, 41 schema and 64 count assertions green at `--scale 0.01` (§1.1, §1.9) |
 | Deploy the Azure environment from Bicep | **Yes.** Deployed for real and destroyed clean on 2026-09-02 (§1.6); the live resources were verified (§1.7) |
-| Seed Oracle on the Azure VM, or run `connect.sh` / `status.sh` live | **Unknown.** The VM booted; nothing was driven through it (§2.1) |
-| Run the AI conversion and compare against the predictions | **Unknown.** Never attempted |
-| Trust the cost estimates | Treat as order-of-magnitude only |
+| Seed Oracle on the Azure VM, or run `connect.sh` / `status.sh` live | **Yes.** `seed-oracle.sh --azure` loaded 1,855 objects onto the VM and the tunnels it needs work (§1.10) |
+| Drive the AI conversion wizard through every step | **Yes**, and it found four defects in this lab on the way (§1.10) |
+| Compare a conversion report against the 43 predictions | **No.** The run started and converted cleanly; no report has been read (§2.2) |
+| Trust the cost estimates | Order-of-magnitude only. The one real datapoint: **$2.97 of tokens for ~25% of a conversion** |
+| Trust the 45–90 minute conversion estimate | **No.** Measured pace suggests roughly three hours for this schema (§1.10) |
 
 **Recommended first step:** `./scripts/seed-oracle.sh --local --scale 0.01`, then
 `./tests/run-tests.sh --local --scale 0.01`. That path is proven, costs nothing, and exercises the
