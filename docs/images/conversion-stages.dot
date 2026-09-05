@@ -24,10 +24,18 @@
 // fail to notice, and a diagram that gave it the same weight as the other six
 // stages would be repeating the mistake it exists to warn about.
 //
-// Every stage body is quoted verbatim from the ASCII original; only the line
-// breaks moved. The invisible first row of each stage table is a spacer that
-// forces all five stage boxes to one width, so the qualifier column lines up
-// and can be read as a column.
+// Every stage body is quoted from the ASCII original; the line breaks moved,
+// and stage 4 says "in the scratch database" where the ASCII said "on the
+// scratch server". That is a correction, not a paraphrase: section 4 of
+// architecture.md says in as many words that the requirement is its own
+// database and not its own server, and that this lab puts migration_scratch on
+// the same flexible server as contoso_store. conversion-pipeline.dot already
+// draws the compile step inside the migration_scratch database, so the old
+// wording made the two diagrams in this set disagree about the same step.
+//
+// The invisible first row of each stage table is a spacer that forces all five
+// stage boxes to one width, so the qualifier column lines up and can be read as
+// a column.
 //
 // rankdir is TB and stays TB: this graph is meant to be tall and legible in a
 // GitHub column, not wide and unreadable.
@@ -127,7 +135,7 @@ digraph conversion_stages {
           <td align="left"><b>4. COMPILE ON SCRATCH</b></td>
           <td align="right"><font point-size="10" color="#0E6B47"><b>ground truth</b></font></td>
         </tr>
-        <tr><td colspan="2" align="left" balign="left"><font point-size="10">Apply the candidate DDL to a <b>_mig_scratch_</b> schema on the scratch server.<br/>The PostgreSQL parser is the judge. An LLM cannot argue with a syntax error.</font></td></tr>
+        <tr><td colspan="2" align="left" balign="left"><font point-size="10">Apply the candidate DDL to a <b>_mig_scratch_</b> schema in the scratch database.<br/>The PostgreSQL parser is the judge. An LLM cannot argue with a syntax error.</font></td></tr>
       </table>>];
 
     s5 [fillcolor="#FDF4F4" color="#A4262C" penwidth=3.0 label=<
@@ -208,7 +216,14 @@ digraph conversion_stages {
 
   { rank = same; clean; s6; }
   clean:ne -> s6:nw [label="  errors  " fontcolor="#A4262C" color="#A4262C" penwidth=1.6];
-  s6:sw -> clean:se [label="  retry  " fontcolor="#4B3F8F" color="#6B5FC7" style=dashed penwidth=1.4 constraint=false];
+  // constraint=false means Graphviz reserves no rank space for this label, so a
+  // plain label lands directly on top of its own spline. The spacer row below
+  // the text lifts the word clear of the dashes.
+  s6:sw -> clean:se [fontcolor="#4B3F8F" color="#6B5FC7" style=dashed penwidth=1.4 constraint=false label=<
+    <table border="0" cellborder="0" cellspacing="0" cellpadding="0">
+      <tr><td>  retry  </td></tr>
+      <tr><td height="16"></td></tr>
+    </table>>];
 
   clean -> ddl [label="  yes  " fontcolor="#0E6B47" color="#107C41" penwidth=1.6];
   s6 -> s7 [label="  still failing  " fontcolor="#A4262C" color="#A4262C" penwidth=1.4];

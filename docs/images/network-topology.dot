@@ -173,9 +173,11 @@ digraph o2p_network_topology {
 
       foundry [fillcolor="#EDE9F9" color="#6B5FC7" label=<
         <table border="0" cellborder="0" cellspacing="0">
+          <tr><td width="470" height="1"></td></tr>
           <tr><td align="left"><b>o2p-foundry-&lt;uniq&gt;</b>   <font point-size="9">Microsoft Foundry account</font></td></tr>
           <tr><td align="left"><font point-size="9">deployment "o2p-schema-conversion"</font></td></tr>
-          <tr><td align="left"><font point-size="9">regional resource, reached over its <b>public endpoint</b></font></td></tr>
+          <tr><td align="left"><font point-size="9">regional resource, reached over its <b>public endpoint</b> — the jumpbox</font></td></tr>
+          <tr><td align="left"><font point-size="9">calls it from inside the VNet, out through the NAT gateway</font></td></tr>
           <tr><td align="left"><font point-size="9" color="#A4262C">no subnet, no peering, no private endpoint in this lab</font></td></tr>
         </table>>];
     }
@@ -191,11 +193,12 @@ digraph o2p_network_topology {
   }
 
   // ------------------------------------------------------------------- flows
-  // Sessions arrive at the workloads from Bastion; the arrowheads point the way
-  // the connection is made, the ranks point the way the ASCII drew it.
-  oraclevm -> bastion [dir=back style=dotted arrowhead=vee color="#605E5C"];
-  jumpbox  -> bastion [dir=back style=dotted arrowhead=vee color="#605E5C"];
-  postgres -> bastion [dir=back style=dotted arrowhead=vee color="#605E5C"];
+  // Sessions arrive at the workloads from Bastion, so the edges are declared
+  // upward and drawn with dir=back: the rank order stays the way the ASCII drew
+  // it, and the arrowhead still points the way the connection is made.
+  oraclevm -> bastion [dir=back arrowtail=vee style=dotted color="#605E5C"];
+  jumpbox  -> bastion [dir=back arrowtail=vee style=dotted color="#605E5C"];
+  postgres -> bastion [dir=back arrowtail=vee style=dotted color="#605E5C"];
 
   oraclevm -> nat [style=dotted arrowhead=vee color="#A19F9D"];
   jumpbox  -> nat [style=dotted arrowhead=vee color="#A19F9D"];
