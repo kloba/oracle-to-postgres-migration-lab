@@ -193,10 +193,9 @@ Two things the config does **not** do, which you have to handle yourself:
 
 `CONTOSO`'s foreign keys are **circular** on purpose:
 
-```text
-region.manager_employee_id ──▶ employee
-employee.store_id ──▶ store ──▶ region
-```
+![Three tables in a closed loop: region.manager_employee_id references employee, employee.store_id references store, and store.region_id references region, so no ordering of the three satisfies every foreign key on insert.](images/fk-cycle.png)
+
+<sub>Source: [`images/fk-cycle.dot`](images/fk-cycle.dot). Regenerate with `./docs/images/render.sh` — edit the `.dot`, never the `.png`.</sub>
 
 There is no ordering of tables that satisfies every foreign key on insert. That circularity is
 deliberate — naive converters emit DDL in dependency order and fall over on it — and it means the

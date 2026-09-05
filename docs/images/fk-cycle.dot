@@ -1,0 +1,123 @@
+// The deliberate circular foreign keys in CONTOSO, for docs/04-migrate-data.md
+// section 5 ("The constraint problem").
+//
+// Rendered to fk-cycle.png by docs/images/render.sh. Edit THIS file, never the
+// .png. Regenerate with:  ./docs/images/render.sh
+//
+// This replaces a two-line ASCII sketch, and it exists because the claim being
+// made in section 5 is topological rather than textual: the three foreign keys
+// close a loop, so there is no order in which the three tables can be inserted.
+// A triangle says that in one glance; two lines of text make the reader trace
+// it. The verdict box repeats the consequence and the fix, because the whole
+// reason the section exists is that the fix is not optional.
+//
+// Kept as Graphviz rather than a drawing so the names stay exact. Every table,
+// column and constraint name below is copied from src/oracle/03-constraints.sql
+// and src/oracle/02-tables.sql, and a diagram that drifts from those is worse
+// than no diagram. The three constraints, verbatim from that file:
+//   fk_region_manager   region.manager_employee_id -> employee (employee_id)
+//   fk_employee_store   employee.store_id          -> store    (store_id)
+//   fk_store_region     store.region_id            -> region   (region_id)
+//
+// Laid out as an explicit triangle rather than left to dot: region on its own
+// rank with employee and store side by side beneath it, so the loop reads as a
+// loop instead of as a list with one edge running back up the side.
+//
+// Colour follows the tiering the rest of docs/images already teaches. Orange
+// (#C77700 / #FDF6EC / #8A5A00) is "the Oracle CONTOSO source" in
+// architecture.dot, network-topology.dot and conversion-pipeline.dot, and
+// these three tables are exactly that, so the cluster is orange. Red #A4262C
+// is only ever an accent on the thing that will hurt you ("no public IP", the
+// fail-open banner in conversion-stages.dot) and never a container fill, so
+// here it is spent solely on the three edges that close the loop and on the
+// verdict box. That leaves exactly one red thing on the page: the cycle.
+
+digraph fk_cycle {
+  bgcolor    = "white";
+  fontname   = "Helvetica";
+  rankdir    = TB;
+  nodesep    = 0.95;
+  ranksep    = 0.38;
+  compound   = true;
+  pad        = 0.35;
+
+  node [shape=box style="rounded,filled" fontname="Helvetica" fontsize=11
+        color="#8A8886" fillcolor="#FFFFFF" penwidth=1.2 margin="0.20,0.14"
+        width=1.65 height=0.62];
+  edge [fontname="Helvetica" fontsize=9 color="#605E5C" penwidth=1.1];
+
+  // -------------------------------------------------------------- the cycle
+  subgraph cluster_cycle {
+    label     = "schema CONTOSO   ·   three tables, three foreign keys, one closed loop   ·   design § 4.2";
+    labeljust = "l";
+    fontsize  = 12;
+    fontcolor = "#8A5A00";
+    style     = "rounded,filled";
+    fillcolor = "#FDF6EC";
+    color     = "#C77700";
+    penwidth  = 1.5;
+    margin    = 16;
+
+    region [color="#C77700" penwidth=1.4 label=<
+      <table border="0" cellborder="0" cellspacing="0">
+        <tr><td><b>region</b></td></tr>
+        <tr><td><font point-size="9" color="#605E5C">region_id (PK)</font></td></tr>
+      </table>>];
+
+    employee [color="#C77700" penwidth=1.4 label=<
+      <table border="0" cellborder="0" cellspacing="0">
+        <tr><td><b>employee</b></td></tr>
+        <tr><td><font point-size="9" color="#605E5C">employee_id (PK)</font></td></tr>
+      </table>>];
+
+    store [color="#C77700" penwidth=1.4 label=<
+      <table border="0" cellborder="0" cellspacing="0">
+        <tr><td><b>store</b></td></tr>
+        <tr><td><font point-size="9" color="#605E5C">store_id (PK)</font></td></tr>
+      </table>>];
+
+    // employee and store share a rank so the three edges close a triangle.
+    { rank = same; employee; store; }
+
+    // The reading key lives inside the cluster, directly under the triangle:
+    // arrow direction is the one thing a reader can invert, and inverting it
+    // turns the whole page into a different (and wrong) claim.
+    readingkey [shape=plaintext style="" fillcolor="none" width=0 height=0 label=<
+      <table border="0" cellborder="0" cellspacing="0" cellpadding="0">
+        <tr><td align="left"><font point-size="9" color="#8A5A00">A → B means A holds a foreign key referencing B's primary key.</font></td></tr>
+      </table>>];
+
+    edge [color="#A4262C" fontcolor="#A4262C" penwidth=2.0 arrowsize=0.9];
+
+    region -> employee [label=<
+      <table border="0" cellborder="0" cellspacing="0">
+        <tr><td><b>region.manager_employee_id</b></td></tr>
+        <tr><td><font point-size="8" color="#8A5A5A">fk_region_manager</font></td></tr>
+      </table>>];
+
+    employee -> store [label=<
+      <table border="0" cellborder="0" cellspacing="0">
+        <tr><td><b>employee.store_id</b></td></tr>
+        <tr><td><font point-size="8" color="#8A5A5A">fk_employee_store</font></td></tr>
+      </table>>];
+
+    store -> region [label=<
+      <table border="0" cellborder="0" cellspacing="0">
+        <tr><td><b>store.region_id</b></td></tr>
+        <tr><td><font point-size="8" color="#8A5A5A">fk_store_region</font></td></tr>
+      </table>>];
+  }
+
+  // ------------------------------------------------- what the loop costs you
+  verdict [fillcolor="#FBE9E9" color="#A4262C" penwidth=1.5 width=0 height=0 label=<
+    <table border="0" cellborder="0" cellspacing="0" cellpadding="1">
+      <tr><td align="left"><font point-size="12" color="#A4262C"><b>No insert order satisfies all three foreign keys.</b></font></td></tr>
+      <tr><td align="left"><font point-size="10">Drop the constraints, copy, put them back — then prove they still hold.</font></td></tr>
+      <tr><td align="left"><font point-size="9" color="#605E5C">ora2pg: <b>DROP_FKEY 1</b>    ·    by hand: <b>SET session_replication_role = 'replica'</b></font></td></tr>
+    </table>>];
+
+  // Invisible: they only pull the caption and verdict box below the cluster.
+  employee   -> readingkey [style=invis];
+  store      -> readingkey [style=invis];
+  readingkey -> verdict    [style=invis];
+}

@@ -139,72 +139,9 @@ cost of a failed attempt is a dropped schema, not a corrupted target.
 It is not "send the DDL to an LLM and print the answer". It is a hybrid: deterministic parsing where
 determinism is possible, a model where it is not, and a compiler as the arbiter.
 
-```text
-   Oracle (CONTOSO)
-        │
-        │  read-only metadata: SELECT_CATALOG_ROLE + SYS.ARGUMENT$
-        ▼
-  ┌───────────────────────────────────────────────────────────────────┐
-  │ 1. EXTRACT + PARSE                            deterministic       │
-  │    Read the data dictionary. Build an object graph with real      │
-  │    dependency edges: types before tables, tables before packages, │
-  │    packages before the views that call them.                      │
-  └───────────────────────────────────────────────────────────────────┘
-        ▼
-  ┌───────────────────────────────────────────────────────────────────┐
-  │ 2. RULE-BASED TRANSLATION                     deterministic       │
-  │    Everything with one right answer: VARCHAR2 -> varchar,         │
-  │    NUMBER(9) -> the appropriate numeric, ORGANIZATION INDEX       │
-  │    dropped, sequence clauses mapped one to one.                   │
-  │    Same input, same output, every run. No tokens spent.           │
-  └───────────────────────────────────────────────────────────────────┘
-        ▼
-  ┌───────────────────────────────────────────────────────────────────┐
-  │ 3. LLM TRANSLATION                            Microsoft Foundry   │
-  │    Everything with a judgement in it: PL/SQL bodies, CONNECT BY   │
-  │    to WITH RECURSIVE, compound triggers, collection mappings,     │
-  │    dynamic SQL. This is where your TPM quota goes.                │
-  └───────────────────────────────────────────────────────────────────┘
-        ▼
-  ┌───────────────────────────────────────────────────────────────────┐
-  │ 4. COMPILE ON SCRATCH                         ground truth        │
-  │    Apply the candidate DDL to a _mig_scratch_ schema on the       │
-  │    scratch server. The PostgreSQL parser is the judge. An LLM     │
-  │    cannot argue with a syntax error.                              │
-  └───────────────────────────────────────────────────────────────────┘
-        ▼
-  ┌───────────────────────────────────────────────────────────────────┐
-  │ 5. DEEP VALIDATION                            plpgsql_check       │
-  │    Compiling is a low bar: PL/pgSQL bodies are only parsed, not   │
-  │    semantically checked, until they run. plpgsql_check inspects   │
-  │    the body — unknown columns, type mismatches, unreachable code, │
-  │    missing RETURN.                                                │
-  │    *** If plpgsql_check is not allow-listed this step is SKIPPED  │
-  │        SILENTLY. No error. No warning in the report. ***          │
-  └───────────────────────────────────────────────────────────────────┘
-        ▼
-     ┌──────────────┐   errors    ┌──────────────────────────────────┐
-     │  clean?      │────────────▶│ 6. AI FIX LOOP                   │
-     │              │             │    Feed the compiler and checker │
-     │              │◀────────────│    diagnostics back to the model │
-     └──────┬───────┘   retry     │    with the failing object.      │
-            │ yes                 │    Bounded: a few attempts, then │
-            │                     │    give up and escalate.         │
-            │                     └───────────────┬──────────────────┘
-            │                                     │ still failing
-            ▼                                     ▼
-  ┌────────────────────────┐        ┌───────────────────────────────────┐
-  │ CONVERTED DDL          │        │ 7. REVIEW TASK                    │
-  │ + conversion report    │        │    Flagged, described, handed to  │
-  │                        │        │    GitHub Copilot agent mode with │
-  │                        │        │    the human in the chair.        │
-  └───────────┬────────────┘        └───────────────┬───────────────────┘
-              │                                     │
-              └──────────────────┬──────────────────┘
-                                 ▼
-                    HUMAN REVIEW, then apply to
-                    contoso_store (schema contoso)
-```
+![The conversion pipeline in seven stages: extract and parse, then rule-based translation, both deterministic; LLM translation via Microsoft Foundry for the judgement calls; compile on a scratch database as ground truth; deep validation by plpgsql_check, which is skipped silently if the extension is not allow-listed; then a bounded AI fix loop, and a review task for whatever still fails. Both outcomes converge on human review before anything is applied to contoso_store.](images/conversion-stages.png)
+
+<sub>Source: [`images/conversion-stages.dot`](images/conversion-stages.dot). Regenerate with `./docs/images/render.sh` — edit the `.dot`, never the `.png`.</sub>
 
 ### Stage 1 — Extract and parse
 

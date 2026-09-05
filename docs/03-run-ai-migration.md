@@ -42,28 +42,9 @@ results — it is not, and the distinction matters to anyone planning a real mig
 
 Understanding the pipeline is what lets you interpret the report instead of just believing it.
 
-```text
-   Oracle CONTOSO                                   PostgreSQL flexible server
-   (metadata only,                          ┌──────────────────────────────────┐
-    read by O2P_READER)                     │  migration_scratch               │
-          │                                 │  ┌────────────────────────────┐  │
-          │  1. rule-based parse            │  │  _mig_scratch_<run>        │  │
-          ▼     the deterministic half      │  │  throwaway schema          │  │
-   ┌─────────────┐                          │  └────────────────────────────┘  │
-   │  extension  │  2. LLM translation      │                                  │
-   │  ms-ossdata │ ──────────────────────▶  │  3. COMPILE it here              │
-   │ .vscode-pgsql│    Microsoft Foundry    │  4. plpgsql_check over it        │
-   └─────────────┘                          └──────────────────────────────────┘
-          │                                                │
-          │  5. automated fix loop  ◀──────────────────────┘  errors feed back
-          ▼
-   ┌─────────────────────────────────────────────┐
-   │  converted DDL   +   report   +   review     │  6. what does not converge
-   │                                     tasks   │     becomes a review task
-   └─────────────────────────────────────────────┘
-                          │
-                          ▼  7. you, with GitHub Copilot agent mode
-```
+![The conversion loop in seven steps: Oracle CONTOSO metadata is parsed by rule, the extension sends the judgement calls to Microsoft Foundry, the result is compiled into a throwaway _mig_scratch_ schema and checked by plpgsql_check, errors feed back into an automated fix loop, and whatever does not converge becomes a review task for a human with GitHub Copilot agent mode.](images/conversion-pipeline.png)
+
+<sub>Source: [`images/conversion-pipeline.dot`](images/conversion-pipeline.dot). Regenerate with `./docs/images/render.sh` — edit the `.dot`, never the `.png`. [`architecture.md`](architecture.md#5-how-the-conversion-pipeline-actually-works) has the same pipeline in more detail.</sub>
 
 Steps 3 and 4 are the reason a scratch database exists. Without them the output is a language
 model's guess written to a file. With them, every object the tool calls "done" has at least
@@ -175,6 +156,21 @@ az network bastion rdp \
   --target-resource-id "$(jq -r .jumpboxVmId generated/outputs.json)"
 ```
 
+**A third route, which is how the run in this document was actually done: Remote-SSH onto the Oracle
+VM.** Open the Oracle VM as a VS Code Remote-SSH host and install the extension *in the remote*. The
+extension host then runs inside the VNet, which collapses three problems at once — Oracle is
+`localhost:1521`, the PostgreSQL FQDN resolves to its private address with no tunnel, and the remote
+is Linux x64 so the ARM64 row above stops mattering. Every screenshot below was taken this way; the
+status bar reads `SSH: o2p-oracle-vm` in all of them.
+
+For the record, the ARM64 row is also more pessimistic than what we observed: the Marketplace serves
+a `darwin-arm64` build, it installs and activates on Apple Silicon, and all seven migration commands
+and the `pg-migrations` view are present.
+
+![The VS Code sidebar with the PostgreSQL extension active: CONNECTIONS, QUERY HISTORY, AZURE DEPLOYMENTS and a MIGRATIONS section offering a Create Migration Project button.](images/screenshots/macos-arm64-02-migrations-view.png)
+
+<sub>The **MIGRATIONS** section at the bottom of the PostgreSQL sidebar is the entry point. `PostgreSQL: Focus on Migrations View` gets you here from the command palette.</sub>
+
 Sign in to GitHub Copilot inside VS Code before going further. Agent mode has to be available
 *before* the conversion produces its review queue — discovering it is missing afterwards is the
 expensive ordering.
@@ -255,6 +251,14 @@ gets the last word and nothing in the deployment output says so. **Choose Micros
 select your account and tenant, and the same Test button turns green. That is also the path the role
 assignment above exists for — with API Key the role is never consulted.
 
+![The Choose a Microsoft Foundry Model step with Authentication Method set to API Key and a red banner reading Azure OpenAI connection test failed: Key based authentication is disabled for this resource.](images/screenshots/05-apikey-disabled.png)
+
+<sub>What the trap looks like. Endpoint, key and deployment name are all correct; the resource simply will not accept a key.</sub>
+
+![The same step with Authentication Method set to Microsoft Entra Id, an Azure Account and Tenant selected, and a green tick beside Test Microsoft Foundry Connection.](images/screenshots/06-foundry-entra-ok.png)
+
+<sub>The same fields on Entra ID. Switching the dropdown adds **Azure Account** and **Tenant**; the account has to be signed in to VS Code first, which the step offers to do for you.</sub>
+
 ### 3.2 Oracle source
 
 The tool reads **metadata only**. It never writes to Oracle and needs no privilege on application
@@ -297,6 +301,14 @@ From the jumpbox the Oracle VM is directly reachable on the VNet at `10.42.1.10:
 ```bash
 ./scripts/connect.sh oracle-azure --tunnel-only --port 15210
 ```
+
+![The Connect to Oracle wizard step, filled in with hostname localhost, port 1521, service FREEPDB1 and user CONTOSO, with a toast reading Oracle connection successful.](images/screenshots/01-oracle-connected.png)
+
+<sub>**Load Schemas** is what actually opens the connection — the toast is the first confirmation you get that the credentials work. Hostname is `localhost` here because the extension host is on the Oracle VM itself.</sub>
+
+![The Schemas dropdown expanded, showing CONTOSO ticked and PUBLIC unticked, with CONTOSO now filled into the field above.](images/screenshots/02-schemas-contoso.png)
+
+<sub>Tick `CONTOSO` only. `PUBLIC` is offered and is never what you want — it is Oracle's namespace for synonyms, not a schema you migrate.</sub>
 
 > **Version note, stated honestly.** Microsoft documents 12.1, 12.2, 18c, 19c and 21c as supported
 > Oracle sources. This lab — like Microsoft's own `mslearn-postgresql` lab — runs Oracle Database
@@ -360,12 +372,24 @@ That script also does the one check `deploy.sh` and `status.sh` cannot: it asks 
 server, and `plpgsql_check` fails open — if it is not in memory the converter skips its deeper
 validation silently and the report looks clean.
 
+![The scratch database step showing the o2p-scratch connection and migration_scratch database selected, with a paragraph listing nine recommended extensions that are not installed.](images/screenshots/03-extensions-missing.png)
+
+<sub>What a correctly *allowlisted* but never *installed* server looks like. Every extension named here was in `azure.extensions` at the time; none of them existed in the database.</sub>
+
+![The same step after running the installer, with the third button now reading Extensions Verified beside a tick, and the Next button enabled.](images/screenshots/04-extensions-verified.png)
+
+<sub>After `install-pg-extensions.sh`. Note that **Next** was already enabled before verification — the wizard lets you walk straight past this, which is precisely why it is worth clicking.</sub>
+
 ---
 
 ## 4. Create the migration project
 
 In VS Code, open the PostgreSQL extension's view and start a new Oracle migration. The wizard asks
 for the four connections above in roughly that order, then for a scope.
+
+![The first wizard step, New Oracle to Azure Database for PostgreSQL migration project, listing its four prerequisites and asking for a project name.](images/screenshots/macos-arm64-01-wizard-step-1.png)
+
+<sub>Step 1 states its own prerequisites, and they are the four connections from section 3. The **Next** button stays disabled until the project has a name.</sub>
 
 > Exact command titles and button labels move between extension releases. This document describes
 > the shape of the flow, not a fixed sequence of clicks; if a label here does not match what you
@@ -392,12 +416,32 @@ in [`design.md`](design.md) section 10, and the lab's one deliberately quoted mi
 (`"StoreAudit_Legacy"`) is there to make you meet it under controlled conditions rather than by
 accident across the whole schema.
 
+When the four connections validate, the wizard hands you a project page with the three stages on it:
+
+![The contoso-conversion project page with three cards: Schema Migration step 1 with a Migrate button, Schema Review step 2, and Application Migration Preview step 3 with a Migrate Application button.](images/screenshots/07-project-created.png)
+
+<sub>The project is written to `~/.github/postgres-migrations/<project-name>/` — configuration under `config/`, everything the run produces under `artifacts/`. That directory is where you go when the UI stops explaining itself.</sub>
+
 ---
 
 ## 5. Run the schema conversion
 
-Start the conversion and leave it alone. On ~1,480 convertible objects at 500,000 TPM, expect
-**45–90 minutes**. On lower quota, considerably longer — it does not fail, it backs off.
+Start the conversion and leave it alone.
+
+**How long it really takes.** This page used to say 45–90 minutes. The one measured run took
+**2h 56m 53s** for 1,299 extracted objects and 7,178,840 tokens, and it stalled twice hard enough to
+need manual intervention. Treat 45–90 minutes as the best case on a small schema and plan for an
+afternoon on one this size. On lower quota, longer still — it does not fail, it backs off.
+
+**The first thing that can go wrong gives you almost nothing to go on.** If the button turns into
+this, the run is over before it started and the UI will not tell you why:
+
+![The migration project page with the Schema Migration button reading Extraction Failed, and a red banner beneath it containing the words Extraction Failed and nothing else.](images/screenshots/08-extraction-failed.png)
+
+<sub>The whole message. The reason lives in `artifacts/oracle/<SCHEMA>/extract/internal/logs/extraction.log`, and on this lab it was the missing `V$RESOURCE_LIMIT` grant from § 3.2 — `ORA-00942`, pool never initialised, `0 extracted, 0 failed, 0 excluded`.</sub>
+
+Read that log before you change anything else. It is the single highest-value file in the project
+directory and nothing in the interface points at it.
 
 What you should see happening, in order:
 
@@ -421,11 +465,19 @@ SELECT count(*) FROM pg_stat_activity WHERE datname = 'migration_scratch';
 
 **Cost.** This is the only usage-billed part of the lab: $5–30 per conversion run with `gpt-5.2`,
 roughly a tenth of that with `gpt-5-mini`. An idle deployment costs nothing, so there is no reason
-to delete it between runs.
+to delete it between runs. The measured run landed inside that range: **7,178,840 tokens, ~$15.50**
+by the tool's own running estimate.
 
 ---
 
 ## 6. Read the report
+
+When it finishes the button reads **Migration Complete** and the extension opens its own summary
+beside the project page:
+
+![The migration project page with Schema Migration marked Migration Complete, beside a Conversion Summary showing status COMPLETED, model gpt-5.2, duration 2h 56m 53s, 7,178,840 tokens and 947 of 1,189 objects converted.](images/screenshots/09-migration-complete.png)
+
+<sub>The real numbers from this lab's run. The full reports are committed under [`docs/conversion-report/`](conversion-report/README.md) so you can compare yours against them.</sub>
 
 The report classifies every object. Read it in this order:
 

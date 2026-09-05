@@ -216,7 +216,7 @@ while IFS= read -r f; do [[ -n "$f" ]] && BICEP_FILES+=("$f");      done < <(fin
 while IFS= read -r f; do [[ -n "$f" ]] && BICEPPARAM_FILES+=("$f"); done < <(find_repo_files -name '*.bicepparam')
 
 CHECKS=(bash-syntax shellcheck exec-bits bicep-build python-compile
-        generator-determinism cloud-init-sync markdown-links secret-scan)
+        generator-determinism cloud-init-sync diagram-sync markdown-links secret-scan)
 [[ -n "$TARGET" ]] && CHECKS+=(verify-schema verify-counts)
 
 if [[ "$LIST_ONLY" -eq 1 ]]; then
@@ -489,6 +489,58 @@ if selected cloud-init-sync; then
         record cloud-init-sync FAIL "embedded installer has drifted from scripts/install-oracle.sh" "$MS"
         show_log "$LOG"
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# diagram-sync
+#
+# docs/images/ holds .dot sources and the .png files rendered from them. The PNGs
+# are committed so the docs render on GitHub without anyone installing Graphviz,
+# which is exactly the arrangement that lets them drift: edit the .dot, forget to
+# re-render, and the documentation now shows a diagram that no longer matches its
+# own source. Nobody would notice, because nothing compares them.
+#
+# This asserts the cheap half of that -- every .dot has a .png beside it -- and,
+# when Graphviz is installed, the expensive half too, by re-rendering and
+# comparing bytes.
+#
+# The byte comparison is deliberately NOT fatal on its own. Graphviz output is
+# not stable across versions, so a CI runner with a different graphviz than the
+# author's would fail a diagram that is perfectly correct. A missing PNG is a
+# real error; a byte difference is a warning worth reading.
+#
+# Re-render with:  ./docs/images/render.sh
+# ---------------------------------------------------------------------------
+if selected diagram-sync; then
+    T0="$(now_ms)"; LOG="${RUN_LOG_DIR}/diagram-sync.log"
+    : > "$LOG"
+    DOT_COUNT=0; MISSING=0
+    for SRC in "${REPO_ROOT}"/docs/images/*.dot; do
+        [[ -e "$SRC" ]] || break
+        DOT_COUNT=$(( DOT_COUNT + 1 ))
+        PNG="${SRC%.dot}.png"
+        if [[ ! -f "$PNG" ]]; then
+            printf 'missing: %s has no rendered %s\n' "${SRC##*/}" "${PNG##*/}" >> "$LOG"
+            MISSING=$(( MISSING + 1 ))
+        fi
+    done
+    if [[ "$DOT_COUNT" -eq 0 ]]; then
+        record diagram-sync SKIP "no .dot files in docs/images" "$(( $(now_ms) - T0 ))"
+    elif [[ "$MISSING" -gt 0 ]]; then
+        record diagram-sync FAIL "${MISSING} of ${DOT_COUNT} diagram(s) not rendered - run ./docs/images/render.sh" "$(( $(now_ms) - T0 ))"
+        show_log "$LOG"
+    elif ! have dot; then
+        record diagram-sync PASS "${DOT_COUNT} diagram(s) rendered (graphviz absent, bytes not compared)" "$(( $(now_ms) - T0 ))"
+    else
+        if "${REPO_ROOT}/docs/images/render.sh" --check >> "$LOG" 2>&1; then
+            record diagram-sync PASS "${DOT_COUNT} diagram(s) byte-identical to their .dot source" "$(( $(now_ms) - T0 ))"
+        else
+            record diagram-sync PASS "${DOT_COUNT} rendered; some differ from this graphviz - see log" "$(( $(now_ms) - T0 ))"
+            printf '  %snote: graphviz output varies by version; a difference here is not necessarily a defect%s\n' \
+                   "$C_DIM" "$C_RESET"
+        fi
+    fi
+    unset DOT_COUNT MISSING SRC PNG
 fi
 
 if selected markdown-links; then

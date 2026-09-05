@@ -891,6 +891,9 @@ SYSDBA
         printf '%10s  %sFAIL%s\n' '-' "$C_RED" "$C_RESET"
         printf '       %sthe conversion tool will fail at pool init with ORA-00942 and%s\n' "$C_RED" "$C_RESET"
         printf '       %sextract 0 objects; grant it by hand before running the wizard:%s\n' "$C_RED" "$C_RESET"
+        # shellcheck disable=SC2016  # v_$resource_limit is Oracle syntax, not a shell
+        # variable. The dollar sign belongs to the view name and must reach the reader
+        # verbatim, so single quotes are correct here and SC2016 is a false positive.
         printf '       %s  GRANT SELECT ON sys.v_$resource_limit TO %s;%s\n' "$C_DIM" "$CONTOSO_SCHEMA" "$C_RESET"
         printf '       %ssee %s%s\n' "$C_DIM" "${log#"$REPO_ROOT"/}" "$C_RESET"
         FAILED=$(( FAILED + 1 ))

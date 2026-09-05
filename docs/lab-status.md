@@ -1,6 +1,6 @@
 # Lab status — what is verified and what is not
 
-**Last updated: 2026-09-04.**
+**Last updated: 2026-09-05.**
 
 This document exists so you know how much to trust the rest of this repository. It separates
 **what has actually been executed and observed** from **what has only been written down**. Where
@@ -26,9 +26,9 @@ Read this before you spend money.
 Everything in this section was run on a developer machine (macOS 14, Apple Silicon, Docker Desktop,
 `bash` 3.2, Python 3.14, Azure CLI logged in) on 2026-09-02, and the output inspected.
 
-### 1.1 The test suite — 8 static checks pass, and all 10 pass against a local seed
+### 1.1 The test suite — 10 static checks pass, and all 12 pass against a local seed
 
-`./tests/run-tests.sh` with no target flag runs the 8 static checks. CI runs the same set as
+`./tests/run-tests.sh` with no target flag runs the 10 static checks. CI runs the same set as
 `--strict`, which raises shellcheck to `severity=style` and turns any SKIP into a failure.
 `./tests/run-tests.sh --local` adds the two Oracle assertion suites against the seeded container.
 All three invocations were run on 2026-09-02 and all three exited 0. The Detail column below is the
@@ -36,18 +36,20 @@ harness's own, with the tool named where the line alone would not say it:
 
 | Check | Result | Detail |
 | --- | --- | --- |
-| `bash-syntax` | PASS | 9 script(s) parse under `bash -n` |
-| `shellcheck` | PASS | 9 clean at `severity=warning`; under CI's `--strict`, 9 clean at `severity=style`. CI pins shellcheck v0.11.0 |
-| `exec-bits` | PASS | 9 script(s) executable |
+| `bash-syntax` | PASS | 10 script(s) parse under `bash -n` |
+| `shellcheck` | PASS | 10 clean at `severity=warning`; under CI's `--strict`, 10 clean at `severity=style`. CI pins shellcheck v0.11.0 |
+| `exec-bits` | PASS | 10 script(s) executable |
 | `bicep-build` | PASS | 8 template(s) compile |
-| `python-compile` | PASS | 2 file(s) compile |
+| `python-compile` | PASS | 3 file(s) compile |
 | `generator-determinism` | PASS | 13 file(s) byte-identical across two different `PYTHONHASHSEED`s |
-| `markdown-links` | PASS | 0 broken, of 105 relative link(s) checked in 12 file(s). The link count moves with every doc edit; the 0 is the claim |
+| `cloud-init-sync` | PASS | the installer embedded in `scripts/cloud-init/oracle-vm.yaml` is byte-identical to `scripts/install-oracle.sh` |
+| `diagram-sync` | PASS | 5 diagram(s) byte-identical to their `.dot` source. Added 2026-09-05 and it immediately found one `.png` that had been edited at source and never re-rendered |
+| `markdown-links` | PASS | 0 broken, of 138 relative link(s) and images checked in 14 file(s). The link count moves with every doc edit; the 0 is the claim |
 | `secret-scan` | PASS | no real GUIDs or tracked `.env` |
 | `verify-schema` | PASS (`--local`) | all assertions passed — `41 passed, 0 failed, 0 not checked` |
 | `verify-counts` | PASS (`--local`) | all assertions passed — `64 passed, 0 failed, 0 not checked (scale 0.01)` |
 
-`./tests/run-tests.sh --local` ends in `10 passed, 0 failed, 0 skipped`. The last two rows are the
+`./tests/run-tests.sh --local` ends in `12 passed, 0 failed, 0 skipped`. The last two rows are the
 ones that changed: this page used to report four failing assertions and a non-zero exit. See §1.9.
 
 ### 1.2 The Oracle schema genuinely builds, and is genuinely large
@@ -489,8 +491,8 @@ back into the repo. Redact both before pasting preflight output into an issue or
 | Read a large, realistic, deliberately hostile Oracle schema | **Yes.** This is the strongest part of the repo |
 | Build that schema locally in Docker and poke at it | **Yes.** Proven working, ~1,855 objects, 0 invalid |
 | Study 43 documented hard migration cases with predictions | **Yes**, as analysis. The predictions are untested |
-| Run the repo's static checks and CI | **Yes.** All 8 pass, and pass under CI's `--strict` (§1.1) |
-| Run the repo's full Oracle test suite and see it green | **Yes.** 10/10 checks, 41 schema and 64 count assertions green at `--scale 0.01` (§1.1, §1.9) |
+| Run the repo's static checks and CI | **Yes.** All 10 pass, and pass under CI's `--strict` (§1.1) |
+| Run the repo's full Oracle test suite and see it green | **Yes.** 12/12 checks, 41 schema and 64 count assertions green at `--scale 0.01` (§1.1, §1.9) |
 | Deploy the Azure environment from Bicep | **Yes.** Deployed for real and destroyed clean on 2026-09-02 (§1.6); the live resources were verified (§1.7) |
 | Seed Oracle on the Azure VM, or run `connect.sh` / `status.sh` live | **Yes.** `seed-oracle.sh --azure` loaded 1,855 objects onto the VM and the tunnels it needs work (§1.10) |
 | Drive the AI conversion wizard through every step | **Yes**, and it found four defects in this lab on the way (§1.10) |

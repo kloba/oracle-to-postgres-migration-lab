@@ -79,7 +79,9 @@ run at all. Per-check logs land in `out/logs/tests-<timestamp>/`, which is gitig
 | `bicep-build` | az + bicep | Every `*.bicep` and `*.bicepparam` compiles. |
 | `python-compile` | python3 | Every `*.py` compiles. |
 | `generator-determinism` | python3 | The generator produces byte-identical output across two runs with **different** `PYTHONHASHSEED` values. |
-| `markdown-links` | python3 | Every *relative* link in every `*.md` resolves to a file that exists. External URLs are never fetched — a test that needs the internet is a test that fails on a train. |
+| `cloud-init-sync` | python3 | `scripts/cloud-init/oracle-vm.yaml` still embeds a byte-identical copy of `scripts/install-oracle.sh`. Re-sync with `python3 tools/sync-cloud-init.py`. |
+| `diagram-sync` | — (graphviz optional) | Every `docs/images/*.dot` has a rendered `*.png` beside it, and — when Graphviz is installed — the PNG still matches its source. Re-render with `./docs/images/render.sh`. A **missing** PNG fails; a byte difference only warns, because Graphviz output is not stable across versions. |
+| `markdown-links` | python3 | Every *relative* link **and image** in every `*.md` resolves to a file that exists. External URLs are never fetched — a test that needs the internet is a test that fails on a train. Generated reports under `docs/conversion-report/` are excluded: they are the conversion tool's own output and link to per-chunk files this repo does not ship. |
 | `secret-scan` | — | No GUID that is not the all-zero placeholder, and no `.env` tracked by git. |
 | `verify-schema` | `--local`/`--azure` | [`tests/verify-schema.sql`](tests/verify-schema.sql) — object budget, zero invalid objects, foreign keys validated, hard-case constructs present. |
 | `verify-counts` | `--local`/`--azure` | [`tests/verify-counts.sql`](tests/verify-counts.sql) — row counts per scale, referential integrity, hierarchy sanity. |
@@ -118,7 +120,9 @@ oracle-to-postgres-migration-lab/
 ├── docs/
 │   ├── design.md              THE CONTRACT — read this first
 │   ├── architecture.md        why the lab is shaped the way it is
-│   └── NN-*.md                the walkthrough, in order
+│   ├── NN-*.md                the walkthrough, in order
+│   └── images/                *.dot sources + the *.png rendered from them,
+│                              plus screenshots/ from a real conversion run
 ├── infra/                     Bicep: VNet, Oracle VM, PostgreSQL flexible server,
 │   └── modules/               Foundry, jumpbox, Bastion
 ├── scripts/                   bash drivers: preflight, deploy, seed, connect, status, destroy
@@ -135,6 +139,27 @@ oracle-to-postgres-migration-lab/
 > The tree above records where the files actually are today. `scripts/seed-oracle.sh` and the
 > test harness accept **either** location, so both work; if you move them, move them wholesale
 > and update design.md in the same pull request.
+
+### Diagrams: edit the `.dot`, never the `.png`
+
+Every diagram in this documentation is Graphviz. The source lives in `docs/images/*.dot`; the
+`.png` beside it is generated and **committed**, so the docs render on GitHub without anyone
+installing Graphviz.
+
+```bash
+./docs/images/render.sh            # re-render every diagram
+./docs/images/render.sh --check    # fail if a .png no longer matches its .dot
+brew install graphviz              # or: apt-get install -y graphviz
+```
+
+Committing generated output is exactly the arrangement that lets it drift, so the `diagram-sync`
+check exists to catch it. It earned its keep on the day it was added, by finding a `.dot` that had
+been improved and never re-rendered.
+
+**Directory trees stay as text.** The box-drawing listings in this file, `README.md` and
+`design.md` are deliberately *not* images. A tree is something people search, copy, paste and diff;
+turning it into a PNG breaks all four and buries a one-line change in a binary blob. The rule is
+about diagrams — things with boxes and arrows that describe a *relationship* — not about listings.
 
 ---
 

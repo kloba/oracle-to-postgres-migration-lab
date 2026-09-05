@@ -1,0 +1,220 @@
+// The AI conversion pipeline for the Contoso Store Oracle -> Azure PostgreSQL
+// lab, drawn the way docs/03-run-ai-migration.md introduces it: seven numbered
+// steps from an Oracle schema that is only ever read, to a review queue that
+// only a human can close.
+//
+// Rendered to conversion-pipeline.png by docs/images/render.sh. Edit THIS file,
+// never the .png. Regenerate with:  ./docs/images/render.sh
+//
+// This is the overview. conversion-stages.dot draws the same pipeline in much
+// more detail, so this one deliberately stays at about one screenful: it
+// carries the seven steps, the four names a reader has to be able to recognise
+// again later - O2P_READER, ms-ossdata.vscode-pgsql, migration_scratch and
+// _mig_scratch_<run> - and nothing else.
+//
+// Steps 3 and 4 are drawn inside the scratch database on purpose, because they
+// are the entire reason it exists. Without them the output is a language
+// model's guess written to a file; with them, every object the tool calls
+// "done" has at least compiled somewhere. Step 4 is the only red thing on the
+// page because it is fail-open: if plpgsql_check is not allowlisted the deeper
+// validation is skipped silently and the report still comes back looking
+// clean, which is the single failure this page exists to prevent.
+//
+// The step numbers are badges rather than prose so a reader can find step N at
+// a glance whether it landed on a node or on an edge, and each badge takes the
+// colour of the tier the step happens in.
+
+digraph conversion_pipeline {
+  bgcolor    = "white";
+  fontname   = "Helvetica";
+  rankdir    = TB;
+  nodesep    = 0.42;
+  ranksep    = 0.52;
+  compound   = true;
+  pad        = 0.35;
+
+  node [shape=box style="rounded,filled" fontname="Helvetica" fontsize=11
+        color="#8A8886" fillcolor="#FFFFFF" penwidth=1.2 margin="0.20,0.14"];
+  edge [fontname="Helvetica" fontsize=9 color="#605E5C" penwidth=1.1];
+
+  // ------------------------------------------------------------- the source
+  oracle [fillcolor="#FBEEDA" color="#C77700" label=<
+    <table border="0" cellborder="0" cellspacing="0">
+      <tr><td align="left"><b>Oracle CONTOSO</b></td></tr>
+      <tr><td align="left"><font point-size="9">metadata only</font></td></tr>
+      <tr><td align="left"><font point-size="9">read by O2P_READER</font></td></tr>
+      <tr><td align="left"><font point-size="9" color="#8A5A00"><b>never written to</b></font></td></tr>
+    </table>>];
+
+  // ------------------------------------------------- the tool, and the model
+  extension [fillcolor="#DCEDFA" color="#0F6CBD" penwidth=1.5 label=<
+    <table border="0" cellborder="0" cellspacing="0">
+      <tr><td align="left"><b>extension</b></td></tr>
+      <tr><td align="left"><font point-size="9">ms-ossdata.vscode-pgsql</font></td></tr>
+    </table>>];
+
+  foundry [fillcolor="#EDE9F9" color="#6B5FC7" label=<
+    <table border="0" cellborder="0" cellspacing="0">
+      <tr><td align="left"><b>Microsoft Foundry</b></td></tr>
+      <tr><td align="left"><font point-size="9">the model deployment</font></td></tr>
+      <tr><td align="left"><font point-size="9">PL/SQL bodies go here</font></td></tr>
+    </table>>];
+
+  { rank = same; extension; foundry; }
+
+  // -------------------------------- where "it converted" stops being a guess
+  subgraph cluster_pg {
+    label     = "PostgreSQL flexible server";
+    labeljust = "l";
+    fontsize  = 12;
+    fontcolor = "#0E6B47";
+    style     = "rounded,filled";
+    fillcolor = "#F3FAF6";
+    color     = "#107C41";
+    penwidth  = 1.6;
+    margin    = 14;
+
+    subgraph cluster_scratch {
+      label     = "migration_scratch";
+      labeljust = "l";
+      fontsize  = 11;
+      fontcolor = "#0E6B47";
+      style     = "rounded,filled";
+      fillcolor = "#E4F2EA";
+      color     = "#3F9A6A";
+      penwidth  = 1.4;
+      margin    = 12;
+
+      mig [fillcolor="#FFFFFF" color="#107C41" style="rounded,filled,dashed" label=<
+        <table border="0" cellborder="0" cellspacing="0">
+          <tr><td align="left"><b>_mig_scratch_&lt;run&gt;</b></td></tr>
+          <tr><td align="left"><font point-size="9">throwaway schema</font></td></tr>
+          <tr><td align="left"><font point-size="9">created and dropped per run</font></td></tr>
+        </table>>];
+
+      compile [fillcolor="#D8EEE3" color="#107C41" penwidth=1.5 label=<
+        <table border="0" cellborder="0" cellspacing="2" cellpadding="1">
+          <tr>
+            <td bgcolor="#107C41" width="18" align="center"><font color="#FFFFFF" point-size="10"><b>3</b></font></td>
+            <td align="left"><b>COMPILE it here</b></td>
+          </tr>
+          <tr>
+            <td></td>
+            <td align="left"><font point-size="9">every object the tool calls &quot;done&quot;</font></td>
+          </tr>
+          <tr>
+            <td></td>
+            <td align="left"><font point-size="9">has at least compiled somewhere</font></td>
+          </tr>
+        </table>>];
+
+      check [fillcolor="#D8EEE3" color="#107C41" penwidth=1.5 label=<
+        <table border="0" cellborder="0" cellspacing="2" cellpadding="1">
+          <tr>
+            <td bgcolor="#107C41" width="18" align="center"><font color="#FFFFFF" point-size="10"><b>4</b></font></td>
+            <td align="left"><b>plpgsql_check over it</b></td>
+          </tr>
+          <tr>
+            <td></td>
+            <td align="left"><font point-size="9" color="#A4262C"><b>fail-open: not allowlisted and</b></font></td>
+          </tr>
+          <tr>
+            <td></td>
+            <td align="left"><font point-size="9" color="#A4262C"><b>this is skipped silently (§ 1.1)</b></font></td>
+          </tr>
+        </table>>];
+
+      { rank = same; compile; check; }
+    }
+  }
+
+  // ------------------------------------------------------ the loop, and out
+  fixloop [fillcolor="#DCEDFA" color="#0F6CBD" penwidth=1.5 label=<
+    <table border="0" cellborder="0" cellspacing="2" cellpadding="1">
+      <tr>
+        <td bgcolor="#0F6CBD" width="18" align="center"><font color="#FFFFFF" point-size="10"><b>5</b></font></td>
+        <td align="left"><b>automated fix loop</b></td>
+      </tr>
+      <tr>
+        <td></td>
+        <td align="left"><font point-size="9">most objects that converge, converge here</font></td>
+      </tr>
+    </table>>];
+
+  output [fillcolor="#FFFFFF" color="#323130" penwidth=1.5 label=<
+    <table border="0" cellborder="0" cellspacing="0" cellpadding="3">
+      <tr>
+        <td align="left"><b>converted DDL</b></td>
+        <td align="center"><font color="#8A8886">+</font></td>
+        <td align="left"><b>report</b></td>
+        <td align="center"><font color="#8A8886">+</font></td>
+        <td align="left"><font color="#8A5A00"><b>review tasks</b></font></td>
+      </tr>
+      <tr>
+        <td colspan="5" align="left"><font point-size="9">no table rows — the tool converts schema and code only</font></td>
+      </tr>
+    </table>>];
+
+  you [fillcolor="#FFFFFF" color="#323130" penwidth=1.5 label=<
+    <table border="0" cellborder="0" cellspacing="2" cellpadding="1">
+      <tr>
+        <td bgcolor="#4B3F8F" width="18" align="center"><font color="#FFFFFF" point-size="10"><b>7</b></font></td>
+        <td align="left"><b>you</b>, with <font color="#4B3F8F"><b>GitHub Copilot agent mode</b></font></td>
+      </tr>
+      <tr>
+        <td></td>
+        <td align="left"><font point-size="9">Pro+, Business or Enterprise seat</font></td>
+      </tr>
+      <tr>
+        <td></td>
+        <td align="left"><font point-size="9">its edits go back through 3 and 4, not straight into the report</font></td>
+      </tr>
+    </table>>];
+
+  // ------------------------------------------------------------------ flows
+  oracle -> extension [color="#C77700" fontcolor="#8A5A00" label=<
+    <table border="0" cellborder="0" cellspacing="2" cellpadding="1">
+      <tr>
+        <td bgcolor="#0F6CBD" width="18" align="center"><font color="#FFFFFF" point-size="10"><b>1</b></font></td>
+        <td align="left"><b>rule-based parse</b></td>
+      </tr>
+      <tr><td></td><td align="left">the deterministic half</td></tr>
+    </table>>];
+
+  extension -> foundry [dir=both color="#6B5FC7" fontcolor="#4B3F8F" style=dashed
+                        constraint=false label=<
+    <table border="0" cellborder="0" cellspacing="2" cellpadding="1">
+      <tr>
+        <td bgcolor="#6B5FC7" width="18" align="center"><font color="#FFFFFF" point-size="10"><b>2</b></font></td>
+        <td align="left"><b>LLM translation</b></td>
+      </tr>
+    </table>>];
+
+  extension -> mig [color="#107C41" fontcolor="#0E6B47"
+                    label="  translated DDL\l  and PL/pgSQL\l"];
+
+  mig     -> compile [color="#107C41" arrowhead=vee];
+  mig     -> check   [style=invis];
+  compile -> check   [color="#107C41" arrowhead=vee];
+
+  // The red edge leaves the whole server, not one node, so ltail clips it at
+  // the cluster border; the invisible partner keeps step 5 centred under the
+  // pair of steps that feed it rather than hanging off the right-hand one.
+  check   -> fixloop [ltail=cluster_pg color="#A4262C" fontcolor="#A4262C"
+                      penwidth=1.4 label="  errors feed back  "];
+  compile -> fixloop [style=invis];
+
+  fixloop -> extension [constraint=false style=dashed color="#0F6CBD"
+                        fontcolor="#0F5A9C" label="  another attempt  "];
+
+  fixloop -> output [color="#323130" fontcolor="#3B3A39" label=<
+    <table border="0" cellborder="0" cellspacing="2" cellpadding="1">
+      <tr>
+        <td bgcolor="#605E5C" width="18" align="center"><font color="#FFFFFF" point-size="10"><b>6</b></font></td>
+        <td align="left"><b>what does not converge</b></td>
+      </tr>
+      <tr><td></td><td align="left">becomes a review task</td></tr>
+    </table>>];
+
+  output -> you [color="#323130" arrowhead=vee];
+}

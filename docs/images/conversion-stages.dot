@@ -1,0 +1,219 @@
+// The conversion pipeline in full, stage by stage - the long form of the
+// summary in conversion-pipeline.dot, and the replacement for the ASCII block
+// in docs/architecture.md section 5.
+//
+// Rendered to conversion-stages.png by docs/images/render.sh. Edit THIS file,
+// never the .png. Regenerate with:  ./docs/images/render.sh
+//
+// The right-hand qualifier on each stage is the whole argument of the picture,
+// so it is carried in its own table column rather than folded into the prose:
+// read that column top to bottom and you get "deterministic, deterministic,
+// Microsoft Foundry, ground truth, plpgsql_check". The tool spends tokens only
+// where determinism is impossible, and the two steps that can actually falsify
+// the model's output are external to the model. Colour carries the same claim -
+// blue for the deterministic passes, purple for everything the model touches
+// (matching Foundry and Copilot in architecture.dot), green for the PostgreSQL
+// steps that judge the result, and near-black for the control flow and for the
+// human, who is not a stage.
+//
+// Stage 5 is deliberately the loudest thing on the page. plpgsql_check fails
+// open: if the extension is missing from the azure.extensions allowlist the
+// deep validation step is skipped with no error, no warning, and nothing in the
+// conversion report to say it did not happen - so the run looks better than it
+// was, not worse. That is the most expensive thing a reader of this lab can
+// fail to notice, and a diagram that gave it the same weight as the other six
+// stages would be repeating the mistake it exists to warn about.
+//
+// Every stage body is quoted verbatim from the ASCII original; only the line
+// breaks moved. The invisible first row of each stage table is a spacer that
+// forces all five stage boxes to one width, so the qualifier column lines up
+// and can be read as a column.
+//
+// rankdir is TB and stays TB: this graph is meant to be tall and legible in a
+// GitHub column, not wide and unreadable.
+
+digraph conversion_stages {
+  bgcolor    = "white";
+  fontname   = "Helvetica";
+  rankdir    = TB;
+  nodesep    = 0.45;
+  ranksep    = 0.42;
+  compound   = true;
+  pad        = 0.35;
+  newrank    = true;
+
+  node [shape=box style="rounded,filled" fontname="Helvetica" fontsize=11
+        color="#8A8886" fillcolor="#FFFFFF" penwidth=1.2 margin="0.20,0.14"];
+  edge [fontname="Helvetica" fontsize=9 color="#605E5C" penwidth=1.1];
+
+  // ------------------------------------------------------------- the source
+  oracle [fillcolor="#FBEEDA" color="#C77700" penwidth=1.6 fontsize=12 label=<
+    <table border="0" cellborder="0" cellspacing="0">
+      <tr><td align="left"><b>Oracle (CONTOSO)</b></td></tr>
+    </table>>];
+
+  // --------------------------------------- deterministic passes: no tokens yet
+  subgraph cluster_rules {
+    label     = "no model involved  ·  same input, same output, every run";
+    labeljust = "l";
+    fontsize  = 11;
+    fontcolor = "#0F5A9C";
+    style     = "rounded,filled";
+    fillcolor = "#F2F8FD";
+    color     = "#0F6CBD";
+    penwidth  = 1.4;
+    margin    = 14;
+
+    s1 [fillcolor="#DCEDFA" color="#0F6CBD" label=<
+      <table border="0" cellborder="0" cellspacing="0" cellpadding="1">
+        <tr><td colspan="2" width="372" height="2"></td></tr>
+        <tr>
+          <td align="left"><b>1. EXTRACT + PARSE</b></td>
+          <td align="right"><font point-size="10" color="#0F5A9C"><b>deterministic</b></font></td>
+        </tr>
+        <tr><td colspan="2" align="left" balign="left"><font point-size="10">Read the data dictionary. Build an object graph with real dependency edges:<br/>types before tables, tables before packages, packages before the views that<br/>call them.</font></td></tr>
+      </table>>];
+
+    s2 [fillcolor="#DCEDFA" color="#0F6CBD" label=<
+      <table border="0" cellborder="0" cellspacing="0" cellpadding="1">
+        <tr><td colspan="2" width="372" height="2"></td></tr>
+        <tr>
+          <td align="left"><b>2. RULE-BASED TRANSLATION</b></td>
+          <td align="right"><font point-size="10" color="#0F5A9C"><b>deterministic</b></font></td>
+        </tr>
+        <tr><td colspan="2" align="left" balign="left"><font point-size="10">Everything with one right answer: VARCHAR2 -&gt; varchar, NUMBER(9) -&gt; the<br/>appropriate numeric, ORGANIZATION INDEX dropped, sequence clauses mapped<br/>one to one.<br/><i>Same input, same output, every run. No tokens spent.</i></font></td></tr>
+      </table>>];
+  }
+
+  // ------------------------------------------------- the model, on your quota
+  subgraph cluster_model {
+    label     = "the model  ·  used where determinism is impossible, not everywhere";
+    labeljust = "l";
+    fontsize  = 11;
+    fontcolor = "#4B3F8F";
+    style     = "rounded,filled";
+    fillcolor = "#F3F1FB";
+    color     = "#8B7FD4";
+    penwidth  = 1.4;
+    margin    = 14;
+
+    s3 [fillcolor="#EDE9F9" color="#6B5FC7" label=<
+      <table border="0" cellborder="0" cellspacing="0" cellpadding="1">
+        <tr><td colspan="2" width="372" height="2"></td></tr>
+        <tr>
+          <td align="left"><b>3. LLM TRANSLATION</b></td>
+          <td align="right"><font point-size="10" color="#4B3F8F"><b>Microsoft Foundry</b></font></td>
+        </tr>
+        <tr><td colspan="2" align="left" balign="left"><font point-size="10">Everything with a judgement in it: PL/SQL bodies, CONNECT BY to WITH<br/>RECURSIVE, compound triggers, collection mappings, dynamic SQL.<br/>This is where your TPM quota goes.</font></td></tr>
+      </table>>];
+  }
+
+  // ----------------------------------------- external arbiters, not the model
+  subgraph cluster_truth {
+    label     = "external to the model  ·  a compiler and a static checker";
+    labeljust = "l";
+    fontsize  = 11;
+    fontcolor = "#0E6B47";
+    style     = "rounded,filled";
+    fillcolor = "#EFF8F3";
+    color     = "#107C41";
+    penwidth  = 1.4;
+    margin    = 14;
+
+    s4 [fillcolor="#D8EEE3" color="#107C41" label=<
+      <table border="0" cellborder="0" cellspacing="0" cellpadding="1">
+        <tr><td colspan="2" width="372" height="2"></td></tr>
+        <tr>
+          <td align="left"><b>4. COMPILE ON SCRATCH</b></td>
+          <td align="right"><font point-size="10" color="#0E6B47"><b>ground truth</b></font></td>
+        </tr>
+        <tr><td colspan="2" align="left" balign="left"><font point-size="10">Apply the candidate DDL to a <b>_mig_scratch_</b> schema on the scratch server.<br/>The PostgreSQL parser is the judge. An LLM cannot argue with a syntax error.</font></td></tr>
+      </table>>];
+
+    s5 [fillcolor="#FDF4F4" color="#A4262C" penwidth=3.0 label=<
+      <table border="0" cellborder="0" cellspacing="0" cellpadding="1">
+        <tr><td colspan="2" width="372" height="2"></td></tr>
+        <tr>
+          <td align="left"><b>5. DEEP VALIDATION</b></td>
+          <td align="right"><font point-size="10" color="#0E6B47"><b>plpgsql_check</b></font></td>
+        </tr>
+        <tr><td colspan="2" align="left" balign="left"><font point-size="10">Compiling is a low bar: PL/pgSQL bodies are only parsed, not semantically<br/>checked, until they run. plpgsql_check inspects the body — unknown columns,<br/>type mismatches, unreachable code, missing RETURN.</font></td></tr>
+        <tr><td colspan="2" height="6"></td></tr>
+        <tr><td colspan="2">
+          <table border="0" cellborder="0" cellspacing="0" cellpadding="8" bgcolor="#A4262C">
+            <tr><td align="center" balign="center"><font color="#FFFFFF" point-size="13"><b>***  If plpgsql_check is not allow-listed<br/>this step is SKIPPED SILENTLY.<br/>No error. No warning in the report.  ***</b></font></td></tr>
+          </table>
+        </td></tr>
+      </table>>];
+  }
+
+  // --------------------------------------------------------- the verdict node
+  clean [shape=diamond style="filled" fillcolor="#FFFFFF" color="#323130" penwidth=2.0
+         fixedsize=true width=1.85 height=1.05 fontsize=12 label=<<b>clean?</b>>];
+
+  // -------------------------------- what the compiler still refuses to accept
+  subgraph cluster_escalate {
+    label     = "bounded retry, then a human";
+    labeljust = "l";
+    fontsize  = 11;
+    fontcolor = "#4B3F8F";
+    style     = "rounded,filled";
+    fillcolor = "#F3F1FB";
+    color     = "#8B7FD4";
+    penwidth  = 1.4;
+    margin    = 14;
+
+    s6 [fillcolor="#EDE9F9" color="#6B5FC7" label=<
+      <table border="0" cellborder="0" cellspacing="0" cellpadding="1">
+        <tr><td width="150" height="2"></td></tr>
+        <tr><td align="left"><b>6. AI FIX LOOP</b></td></tr>
+        <tr><td align="left" balign="left"><font point-size="10">Feed the compiler and checker<br/>diagnostics back to the model<br/>with the failing object.<br/><i>Bounded: a few attempts, then<br/>give up and escalate.</i></font></td></tr>
+      </table>>];
+
+    s7 [fillcolor="#EDE9F9" color="#6B5FC7" label=<
+      <table border="0" cellborder="0" cellspacing="0" cellpadding="1">
+        <tr><td width="150" height="2"></td></tr>
+        <tr><td align="left"><b>7. REVIEW TASK</b></td></tr>
+        <tr><td align="left" balign="left"><font point-size="10">Flagged, described, handed to<br/>GitHub Copilot agent mode with<br/>the human in the chair.</font></td></tr>
+      </table>>];
+  }
+
+  ddl [fillcolor="#FFFFFF" color="#107C41" penwidth=1.8 label=<
+    <table border="0" cellborder="0" cellspacing="0" cellpadding="1">
+      <tr><td align="left"><b>CONVERTED DDL</b></td></tr>
+      <tr><td align="left"><b>+ conversion report</b></td></tr>
+    </table>>];
+
+  human [fillcolor="#FFFFFF" color="#323130" penwidth=2.2 fontsize=13 label=<
+    <table border="0" cellborder="0" cellspacing="0" cellpadding="2">
+      <tr><td align="center"><b>HUMAN REVIEW</b></td></tr>
+    </table>>];
+
+  target [fillcolor="#D8EEE3" color="#107C41" penwidth=1.8 label=<
+    <table border="0" cellborder="0" cellspacing="0" cellpadding="1">
+      <tr><td align="center"><b>contoso_store</b></td></tr>
+      <tr><td align="center"><font point-size="10">(schema contoso)</font></td></tr>
+    </table>>];
+
+  // ------------------------------------------------------------------- flows
+  oracle -> s1 [color="#C77700" fontcolor="#8A5A00" penwidth=1.4 lhead="cluster_rules" label=<
+    <table border="0" cellborder="0" cellspacing="0"><tr><td align="left">  read-only metadata:</td></tr>
+    <tr><td align="left">  SELECT_CATALOG_ROLE + SYS.ARGUMENT$</td></tr></table>>];
+
+  s1 -> s2 [penwidth=1.4 color="#0F6CBD"];
+  s2 -> s3 [penwidth=1.4 color="#6B5FC7" ltail="cluster_rules" lhead="cluster_model"];
+  s3 -> s4 [penwidth=1.4 color="#107C41" ltail="cluster_model" lhead="cluster_truth"];
+  s4 -> s5 [penwidth=1.4 color="#107C41"];
+  s5 -> clean [penwidth=1.6 color="#323130" ltail="cluster_truth"];
+
+  { rank = same; clean; s6; }
+  clean:ne -> s6:nw [label="  errors  " fontcolor="#A4262C" color="#A4262C" penwidth=1.6];
+  s6:sw -> clean:se [label="  retry  " fontcolor="#4B3F8F" color="#6B5FC7" style=dashed penwidth=1.4 constraint=false];
+
+  clean -> ddl [label="  yes  " fontcolor="#0E6B47" color="#107C41" penwidth=1.6];
+  s6 -> s7 [label="  still failing  " fontcolor="#A4262C" color="#A4262C" penwidth=1.4];
+
+  ddl -> human [color="#323130" penwidth=1.4 arrowhead=vee];
+  s7 -> human [color="#323130" penwidth=1.4 arrowhead=vee ltail="cluster_escalate"];
+  human -> target [label="  then apply to  " fontcolor="#0E6B47" color="#107C41" penwidth=1.8];
+}

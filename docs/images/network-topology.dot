@@ -1,0 +1,215 @@
+// Network topology for the Contoso Store Oracle -> Azure PostgreSQL lab.
+//
+// Rendered to network-topology.png by docs/images/render.sh. Edit THIS file,
+// never the .png. Regenerate with:  ./docs/images/render.sh
+//
+// This is the picture that docs/01-deploy-infrastructure.md argues for, and it
+// exists to make three boundaries impossible to misread. The outer dashed box
+// is the resource group, which is why teardown is one operation. The blue box
+// inside it is the VNet, which is why nothing here has a public IP: sessions
+// come in only through Azure Bastion and packets leave only through the NAT
+// gateway. Microsoft Foundry sits inside the resource group but OUTSIDE the
+// VNet, because it is a regional service reached over its public endpoint —
+// people assume it is peered or private, it is not, and the conversion run
+// stops working the moment the NAT gateway is missing.
+//
+// Kept as Graphviz rather than a drawing so the names stay exact: every subnet
+// prefix, static IP, VM size and database name here is a literal value from
+// infra/main.bicep, infra/main.bicepparam and .env.example, and a diagram that
+// drifts from those is worse than no diagram.
+
+digraph o2p_network_topology {
+  bgcolor    = "white";
+  fontname   = "Helvetica";
+  rankdir    = TB;
+  nodesep    = 0.40;
+  ranksep    = 0.60;
+  compound   = true;
+  pad        = 0.35;
+
+  node [shape=box style="rounded,filled" fontname="Helvetica" fontsize=11
+        color="#8A8886" fillcolor="#FFFFFF" penwidth=1.2 margin="0.20,0.14"];
+  edge [fontname="Helvetica" fontsize=9 color="#605E5C" penwidth=1.1];
+
+  // ------------------------------------------------- the teardown boundary
+  subgraph cluster_rg {
+    label     = "resource group   o2p-migration-lab-rg      ·      everything lands here, so teardown is one operation";
+    labeljust = "l";
+    fontsize  = 12;
+    fontcolor = "#3B3A39";
+    style     = "rounded,filled,dashed";
+    fillcolor = "#FAF9F8";
+    color     = "#605E5C";
+    penwidth  = 1.5;
+    margin    = 18;
+
+    // ----------------------------------------------- the network boundary
+    subgraph cluster_vnet {
+      label     = "Azure VNet   o2p-vnet   10.42.0.0/16";
+      labeljust = "l";
+      fontsize  = 12;
+      fontcolor = "#0F5A9C";
+      style     = "rounded,filled";
+      fillcolor = "#F2F8FD";
+      color     = "#0F6CBD";
+      penwidth  = 1.6;
+      margin    = 16;
+
+      // -- source ------------------------------------------------------------
+      subgraph cluster_snet_oracle {
+        label     = "snet-oracle   10.42.1.0/24";
+        labeljust = "l";
+        fontsize  = 10;
+        fontcolor = "#8A5A00";
+        style     = "rounded,filled";
+        fillcolor = "#FDF6EC";
+        color     = "#C77700";
+        margin    = 12;
+
+        oraclevm [fillcolor="#FBEEDA" color="#C77700" label=<
+          <table border="0" cellborder="0" cellspacing="0">
+            <tr><td align="left"><b>o2p-oracle-vm</b></td></tr>
+            <tr><td align="left"><font point-size="9">Ubuntu 22.04 · Standard_D4s_v5</font></td></tr>
+            <tr><td align="left"><font point-size="9">Oracle Free 23ai (docker)</font></td></tr>
+            <tr><td align="left"><font point-size="9">128 GiB Premium SSD data disk</font></td></tr>
+            <tr><td align="left"><font point-size="9"><b>10.42.1.10</b> static · becomes ORACLE_HOST</font></td></tr>
+            <tr><td align="left"><font point-size="9" color="#A4262C">no public IP</font></td></tr>
+            <tr><td align="left"><font point-size="9" color="#8A5A00"><b>(simulated on-premises)</b></font></td></tr>
+          </table>>];
+      }
+
+      // -- workstation -------------------------------------------------------
+      subgraph cluster_snet_jump {
+        label     = "snet-jumpbox   10.42.2.0/24";
+        labeljust = "l";
+        fontsize  = 10;
+        fontcolor = "#0F5A9C";
+        style     = "rounded,filled";
+        fillcolor = "#EEF6FC";
+        color     = "#0F6CBD";
+        margin    = 12;
+
+        jumpbox [fillcolor="#DCEDFA" color="#0F6CBD" label=<
+          <table border="0" cellborder="0" cellspacing="0">
+            <tr><td align="left"><b>o2p-jump</b></td></tr>
+            <tr><td align="left"><font point-size="9">Windows x64 (Server 2022) · Standard_D4s_v5</font></td></tr>
+            <tr><td align="left"><font point-size="9">VS Code + ms-ossdata.vscode-pgsql</font></td></tr>
+            <tr><td align="left"><font point-size="9">where you drive the conversion</font></td></tr>
+            <tr><td align="left"><font point-size="9"><b>10.42.2.10</b> static</font></td></tr>
+            <tr><td align="left"><font point-size="9" color="#A4262C">no public IP</font></td></tr>
+          </table>>];
+      }
+
+      // -- target ------------------------------------------------------------
+      subgraph cluster_snet_pg {
+        label     = "snet-postgres   10.42.3.0/24   (delegated subnet)";
+        labeljust = "l";
+        fontsize  = 10;
+        fontcolor = "#0E6B47";
+        style     = "rounded,filled";
+        fillcolor = "#EFF8F3";
+        color     = "#107C41";
+        margin    = 12;
+
+        postgres [fillcolor="#D8EEE3" color="#107C41" label=<
+          <table border="0" cellborder="0" cellspacing="0">
+            <tr><td align="left"><b>o2p-pg-&lt;uniq&gt;</b></td></tr>
+            <tr><td align="left"><font point-size="9">PostgreSQL flexible server 16 · Standard_D4ds_v5</font></td></tr>
+            <tr><td align="left"><font point-size="9">delegated subnet, private DNS only</font></td></tr>
+            <tr><td align="left"><font point-size="9"><b>contoso_store</b> — the migration target</font></td></tr>
+            <tr><td align="left"><font point-size="9"><b>migration_scratch</b> — where the tool compiles</font></td></tr>
+            <tr><td align="left"><font point-size="9" color="#A4262C"><b>no public endpoint at all</b></font></td></tr>
+          </table>>];
+      }
+
+      // -- the only way in ---------------------------------------------------
+      subgraph cluster_snet_bastion {
+        label     = "AzureBastionSubnet   10.42.4.0/26";
+        labeljust = "l";
+        fontsize  = 10;
+        fontcolor = "#3B3A39";
+        style     = "rounded,filled";
+        fillcolor = "#F0F0F0";
+        color     = "#8A8886";
+        margin    = 12;
+
+        bastion [fillcolor="#E4E4E4" color="#605E5C" label=<
+          <table border="0" cellborder="0" cellspacing="0">
+            <tr><td width="620" height="1"></td></tr>
+            <tr><td align="left"><b>o2p-bastion</b>   <font point-size="9">— RDP and SSH in.  </font><font point-size="9" color="#A4262C"><b>The only way in:</b></font><font point-size="9"> browser RDP, or az network bastion tunnel</font></td></tr>
+            <tr><td align="left"><font point-size="9"><b>Standard</b> SKU — Basic rejects native tunneling, and the tunnel is how scripts/connect.sh reaches both the Oracle VM and the private PostgreSQL server</font></td></tr>
+            <tr><td align="left"><font point-size="9">the subnet must carry that exact name and be /26 or larger — Azure's rule, not ours</font></td></tr>
+          </table>>];
+      }
+
+      // -- the only way out --------------------------------------------------
+      // pgspacer is a zero-size invisible peer for the PostgreSQL column. The
+      // flexible server has no NAT attachment - it is PaaS and needs no egress
+      // - but without some downward edge of its own, dot drags snet-postgres
+      // into the middle of the row and the three subnets stop reading in
+      // address order. It draws nothing.
+      pgspacer [style=invis label="" width=0.02 height=0.02 margin=0];
+
+      nat [fillcolor="#F5F5F5" color="#605E5C" label=<
+        <table border="0" cellborder="0" cellspacing="0">
+          <tr><td width="620" height="1"></td></tr>
+          <tr><td align="left"><b>NAT gateway + public IP</b>   <font point-size="9" color="#A4262C"><b>— the only outbound path; no VM has a public IP</b></font></td></tr>
+          <tr><td align="left"><font point-size="9">attached to snet-oracle and snet-jumpbox only: the Oracle image pull, the VS Code Marketplace, GitHub and Foundry all leave through here</font></td></tr>
+          <tr><td align="left"><font point-size="9">Azure retired default outbound access in September 2025 — without this, half the lab hangs and none of it says why</font></td></tr>
+        </table>>];
+    }
+
+    // ------------------------------------- in the group, outside the network
+    subgraph cluster_foundry {
+      label     = "regional resource   ·   OUTSIDE the VNet";
+      labeljust = "l";
+      fontsize  = 11;
+      fontcolor = "#4B3F8F";
+      style     = "rounded,filled";
+      fillcolor = "#F3F1FB";
+      color     = "#8B7FD4";
+      penwidth  = 1.4;
+      margin    = 14;
+
+      foundry [fillcolor="#EDE9F9" color="#6B5FC7" label=<
+        <table border="0" cellborder="0" cellspacing="0">
+          <tr><td align="left"><b>o2p-foundry-&lt;uniq&gt;</b>   <font point-size="9">Microsoft Foundry account</font></td></tr>
+          <tr><td align="left"><font point-size="9">deployment "o2p-schema-conversion"</font></td></tr>
+          <tr><td align="left"><font point-size="9">regional resource, reached over its <b>public endpoint</b></font></td></tr>
+          <tr><td align="left"><font point-size="9" color="#A4262C">no subnet, no peering, no private endpoint in this lab</font></td></tr>
+        </table>>];
+    }
+
+    // A legend, not a resource: both names above end in <uniq> and readers ask.
+    uniqnote [style="rounded,filled,dashed" fillcolor="#FFFFFF" color="#A19F9D" penwidth=1.0 label=<
+      <table border="0" cellborder="0" cellspacing="0">
+        <tr><td align="left"><font point-size="9"><b>&lt;uniq&gt;</b> is a deterministic hash of your</font></td></tr>
+        <tr><td align="left"><font point-size="9">subscription ID and resource group name.</font></td></tr>
+        <tr><td align="left"><font point-size="9">PostgreSQL server names and Foundry</font></td></tr>
+        <tr><td align="left"><font point-size="9">account names must be globally unique.</font></td></tr>
+      </table>>];
+  }
+
+  // ------------------------------------------------------------------- flows
+  // Sessions arrive at the workloads from Bastion; the arrowheads point the way
+  // the connection is made, the ranks point the way the ASCII drew it.
+  oraclevm -> bastion [dir=back style=dotted arrowhead=vee color="#605E5C"];
+  jumpbox  -> bastion [dir=back style=dotted arrowhead=vee color="#605E5C"];
+  postgres -> bastion [dir=back style=dotted arrowhead=vee color="#605E5C"];
+
+  oraclevm -> nat [style=dotted arrowhead=vee color="#A19F9D"];
+  jumpbox  -> nat [style=dotted arrowhead=vee color="#A19F9D"];
+
+  // The way in sits above the way out, as it does in the prose. pgspacer keeps
+  // the subnet row in address order; see its declaration above.
+  bastion  -> nat      [style=invis weight=5];
+  postgres -> pgspacer [style=invis];
+
+  // The legend rides down to the bottom row beside Foundry rather than floating
+  // up into rank 0, which is where an unconnected node would land.
+  nat -> uniqnote [style=invis];
+
+  nat -> foundry [style=dashed color="#6B5FC7" fontcolor="#4B3F8F" penwidth=1.4
+                  lhead=cluster_foundry
+                  label="  https to the public endpoint —\l  the only traffic that leaves the VNet\l"];
+}

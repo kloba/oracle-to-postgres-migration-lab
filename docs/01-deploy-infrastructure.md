@@ -25,34 +25,9 @@ piece takes, how to prove it worked, and how to make it stop costing money.
 Everything lands in a single resource group, `AZ_RESOURCE_GROUP` (default
 `o2p-migration-lab-rg`), so teardown is one operation.
 
-```text
-                        resource group: o2p-migration-lab-rg
-  ┌──────────────────────────────────────────────────────────────────────────────┐
-  │  o2p-vnet   10.42.0.0/16                                                     │
-  │                                                                              │
-  │   10.42.1.0/24            10.42.2.0/24            10.42.3.0/24               │
-  │  ┌───────────────┐       ┌───────────────┐       ┌────────────────────────┐  │
-  │  │ o2p-oracle-vm │       │   o2p-jump    │       │  o2p-pg-<uniq>         │  │
-  │  │ Ubuntu 22.04  │       │ Windows x64   │       │  PostgreSQL flexible   │  │
-  │  │ D4s_v5        │       │ D4s_v5        │       │  server 16, D4ds_v5    │  │
-  │  │ Oracle Free   │       │ VS Code +     │       │  delegated subnet,     │  │
-  │  │ 23ai (docker) │       │ ms-ossdata    │       │  private DNS only      │  │
-  │  │ 10.42.1.10    │       │ 10.42.2.10    │       │  contoso_store         │  │
-  │  │  (simulated   │       │               │       │  migration_scratch     │  │
-  │  │   on-premises)│       │               │       │                        │  │
-  │  └───────┬───────┘       └───────┬───────┘       └───────────┬────────────┘  │
-  │          │                       │                           │               │
-  │  ┌───────┴───────────────────────┴───────────────────────────┴────────────┐  │
-  │  │  10.42.4.0/26  AzureBastionSubnet -> o2p-bastion  (RDP and SSH in)     │  │
-  │  └────────────────────────────────────────────────────────────────────────┘  │
-  │  ┌────────────────────────────────────────────────────────────────────────┐  │
-  │  │  NAT gateway + public IP (the only outbound path; no VM has a public IP)│  │
-  │  └────────────────────────────────────────────────────────────────────────┘  │
-  └──────────────────────────────────────────────────────────────────────────────┘
+![One resource group, o2p-migration-lab-rg, holding a 10.42.0.0/16 virtual network with three workload subnets: the Oracle VM on 10.42.1.10, the PostgreSQL flexible server in a delegated subnet, and the Windows jumpbox on 10.42.2.10. Azure Bastion is the only way in, a NAT gateway is the only way out, and the Microsoft Foundry account sits outside the VNet, reached over its public endpoint.](images/network-topology.png)
 
-     o2p-foundry-<uniq>   Microsoft Foundry account, deployment "o2p-schema-conversion"
-                          (regional resource, reached over its public endpoint)
-```
+<sub>Source: [`images/network-topology.dot`](images/network-topology.dot). Regenerate with `./docs/images/render.sh` — edit the `.dot`, never the `.png`.</sub>
 
 | Resource | Name | Purpose | Why this configuration |
 | --- | --- | --- | --- |
