@@ -155,6 +155,10 @@ Created 27 batches for 1260 objects, workers=5
 Extraction … complete in 2m 50s: 1299 extracted, 0 failed, 185 excluded
 ```
 
+![The same project page four minutes later, the Schema Migration button now reading Extracting and greyed out while the run is in flight.](08a-extracting.png)
+
+<sub>`08a-extracting.png`, 19:31 — the same button, four minutes and one grant later.</sub>
+
 Worth knowing: `V$RESOURCE_LIMIT` returns **zero rows inside a PDB** — it is a
 CDB-level view. That is fine. The extractor logs `Auto-detected workers: 5
 (sessions: 0/0, available: 0)` and carries on. The missing privilege was fatal;
@@ -166,6 +170,13 @@ the skip it uses for the optional `DBMS_RLS` grant — losing this one costs you
 whole conversion, not one hard case.
 
 ## What the conversion actually did — `09-migration-complete.png`
+
+Then it converts, for a long time. `08b-converting.png` is the same page at 22:22,
+two hours and fifty-one minutes in, still reading **Converting …** — which is the
+only progress the UI offers. Everything you can actually learn while it runs is in
+`artifacts/oracle/<SCHEMA>/convert/sessions/<id>/internal/logs/conversion.log`.
+
+![The project page nearly three hours into the run, the Schema Migration button still reading Converting.](08b-converting.png)
 
 It finished. **Migration Complete**, and the extension opens its own Conversion
 Summary beside the project page:
@@ -269,3 +280,13 @@ All are cropped to the VS Code window, which keeps the macOS menu bar, the Dock,
 notification badges and meeting reminders out of a public repository. One earlier
 screenshot leaked a machine hostname in a terminal prompt and had to be recropped.
 Check anything you add here the same way before committing it.
+
+These eleven frames are also assembled into the timelapse embedded at the top of
+the [README](../../../README.md#the-migration-end-to-end). If you add or replace a
+screenshot here, rebuild it:
+
+```bash
+./docs/images/build-timelapse.py
+```
+
+Edit the `FRAMES` table in that script — never the `.gif` or the `.mp4`.

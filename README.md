@@ -52,6 +52,7 @@ what a human still has to do.
 ## Contents
 
 - [Architecture](#architecture)
+- [The migration, end to end](#the-migration-end-to-end)
 - [What you will learn](#what-you-will-learn)
 - [What is in the schema](#what-is-in-the-schema)
 - [Quickstart](#quickstart)
@@ -103,6 +104,27 @@ just a language model's guess written to a file.
 > realistic latency between the client and the source. Use it to get the schema right; use the VM
 > for the actual lab. See [Local-only quickstart](#local-only-quickstart) below, or
 > [02 — Seed the Oracle source](docs/02-seed-oracle.md#1-before-you-start) for the full local setup.
+
+---
+
+## The migration, end to end
+
+A timelapse of the real run on 2026-09-04 — every frame is a screenshot taken while it happened,
+stamped with the wall-clock time it was taken. Three hours and twenty-one minutes from the first
+Oracle connection to **Migration Complete**, in twenty-six seconds.
+
+![Timelapse of the conversion: Oracle connects, the schema is selected, Verify Extensions reports nine missing, the extensions are installed, the Foundry API key is refused by tenant policy, Entra ID is accepted, the project is created, extraction fails with ORA-00942, extraction succeeds after one grant, the conversion runs for nearly three hours, and finishes with 947 of 1,185 objects converted.](docs/images/migration-timelapse.gif)
+
+<sub>Higher quality: [`docs/images/migration-timelapse.mp4`](docs/images/migration-timelapse.mp4) (26 s, 1200×798). Rebuild both with [`./docs/images/build-timelapse.py`](docs/images/build-timelapse.py) — the frames it composes are the committed screenshots in [`docs/images/screenshots/`](docs/images/screenshots/README.md).</sub>
+
+**It is not a success reel, and that is the point.** Two of the eleven frames are failures — the
+Foundry API key refused by a tenant policy, and an `Extraction Failed` banner whose entire message
+is the words "Extraction Failed". Both were real, both cost real time, and both are written up with
+their fixes in [docs/images/screenshots/](docs/images/screenshots/README.md). The final number,
+**947 of 1,185 objects (79.92%)**, is a *lower bound*: roughly four fifths of the failures the tool
+reports are scratch-database timeouts and lock contention rather than bad translations, and the run
+had to be unwedged by hand twice. The full analysis is in
+[docs/conversion-report/](docs/conversion-report/README.md).
 
 ---
 
