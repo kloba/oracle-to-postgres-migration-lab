@@ -116,7 +116,7 @@ digraph contoso_lab {
 
       postgres [fillcolor="#D8EEE3" color="#107C41" label=<
         <table border="0" cellborder="0" cellspacing="0">
-          <tr><td align="left"><b>o2p-pg-&lt;unique&gt;</b></td></tr>
+          <tr><td align="left"><b>o2p-pg-&lt;uniq&gt;</b></td></tr>
           <tr><td align="left"><font point-size="9">PostgreSQL 16 flexible server</font></td></tr>
           <tr><td align="left"><font point-size="9"><b>contoso_store</b> — the migration target</font></td></tr>
           <tr><td align="left"><font point-size="9"><b>migration_scratch</b> — where the tool</font></td></tr>

@@ -36,7 +36,7 @@ Everything lands in a single resource group, `AZ_RESOURCE_GROUP` (default
 | Jumpbox subnet | `10.42.2.0/24` | The VS Code client | Separate subnet so you can apply different NSG rules to the client than to the database |
 | PostgreSQL subnet | `10.42.3.0/24` | Delegated to the flexible server | VNet integration means the server has **no public endpoint at all** |
 | Bastion subnet | `10.42.4.0/26` | Azure Bastion | Must be named `AzureBastionSubnet` and be /26 or larger. Azure's rule, not ours |
-| NAT gateway + public IP | `o2p-natgw` | Outbound internet for both VMs | Azure retired default outbound access in September 2025. Without this the Oracle image pull and the VS Code Marketplace both hang |
+| NAT gateway + public IP | `nat-o2p-vnet` + `nat-o2p-vnet-pip` | Outbound internet for both VMs | Azure retired default outbound access in September 2025. Without this the Oracle image pull and the VS Code Marketplace both hang |
 | Oracle VM | `o2p-oracle-vm` | **The simulated on-premises source.** Runs Oracle Database Free 23ai in a container | Ubuntu 22.04, `Standard_D4s_v5`, 128 GiB Premium SSD data disk for the datafiles. A VM, not a managed service, because the point is to migrate *from a server you control* — see [architecture.md](architecture.md#2-why-an-oracle-vm-and-not-a-managed-service) |
 | PostgreSQL flexible server | `o2p-pg-<uniq>` | Conversion target and scratch host | PostgreSQL 16. Fifteen is the floor; see below |
 | Target database | `contoso_store` | Where the converted schema lands | Schema `contoso` inside it |
@@ -145,7 +145,7 @@ the interesting part:
   [ .. ] starting o2p-deploy-20260902-114233
   [ ok ] Resources/deployments                              deploy-network
   [ ok ] Network/virtualNetworks                            o2p-vnet
-  [ ok ] Network/natGateways                                o2p-natgw
+  [ ok ] Network/natGateways                                nat-o2p-vnet
   [ .. ] DBforPostgreSQL/flexibleServers                    o2p-pg-h7k2mq4xw3abc
   [ ok ] Compute/virtualMachines                            o2p-oracle-vm
   [ ok ] CognitiveServices/accounts                         o2p-foundry-h7k2mq4xw3abc

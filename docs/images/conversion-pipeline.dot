@@ -75,7 +75,7 @@ digraph conversion_pipeline {
     margin    = 14;
 
     subgraph cluster_scratch {
-      label     = "migration_scratch";
+      label     = "migration_scratch  ·  the scratch database";
       labeljust = "l";
       fontsize  = 11;
       fontcolor = "#0E6B47";
@@ -190,8 +190,28 @@ digraph conversion_pipeline {
       </tr>
     </table>>];
 
-  extension -> mig [color="#107C41" fontcolor="#0E6B47"
+  // minlen=2 here and on check -> fixloop below opens one empty rank above the
+  // server box and one below it. Those two ranks are where w1 and w4 live, and
+  // they are the whole reason the retry edge can come back over the top of the
+  // box instead of through it - see the lane comment further down.
+  extension -> mig [color="#107C41" fontcolor="#0E6B47" minlen=2
                     label="  translated DDL\l  and PL/pgSQL\l"];
+
+  // A lane of invisible waypoints down the right-hand side. dot does not treat
+  // a cluster box as an obstacle when it routes splines, so a single
+  // fixloop -> extension edge is drawn straight through the corners of the
+  // PostgreSQL server - which reads as "the fix loop happens in the database",
+  // the one thing this page is trying not to say. Routing the edge through
+  // w4 -> w3 -> w2 -> w1 pins it outside the box. weight=0 keeps the lane out
+  // of the x-coordinate solver so steps 5, 6 and 7 stay on the centre spine.
+  w1 [shape=box label="" width=0.16 height=0.02 style=invis];
+  w2 [shape=box label="" width=0.16 height=0.02 style=invis];
+  w3 [shape=box label="" width=0.16 height=0.02 style=invis];
+  w4 [shape=box label="" width=0.16 height=0.02 style=invis];
+  foundry -> w1 [style=invis weight=0];
+  w1 -> w2      [style=invis weight=0];
+  w2 -> w3      [style=invis weight=0];
+  w3 -> w4      [style=invis weight=0];
 
   mig     -> compile [color="#107C41" arrowhead=vee];
   mig     -> check   [style=invis];
@@ -201,11 +221,15 @@ digraph conversion_pipeline {
   // the cluster border; the invisible partner keeps step 5 centred under the
   // pair of steps that feed it rather than hanging off the right-hand one.
   check   -> fixloop [ltail=cluster_pg color="#A4262C" fontcolor="#A4262C"
-                      penwidth=1.4 label="  errors feed back  "];
+                      penwidth=1.4 minlen=2 label="  errors feed back  "];
   compile -> fixloop [style=invis];
 
-  fixloop -> extension [constraint=false style=dashed color="#0F6CBD"
-                        fontcolor="#0F5A9C" label="  another attempt  "];
+  fixloop -> w4 [constraint=false dir=none style=dashed color="#0F6CBD"];
+  w4 -> w3      [constraint=false dir=none style=dashed color="#0F6CBD"];
+  w3 -> w2      [constraint=false dir=none style=dashed color="#0F6CBD"
+                 fontcolor="#0F5A9C" label="  another attempt  "];
+  w2 -> w1      [constraint=false dir=none style=dashed color="#0F6CBD"];
+  w1 -> extension [constraint=false style=dashed color="#0F6CBD"];
 
   fixloop -> output [color="#323130" fontcolor="#3B3A39" label=<
     <table border="0" cellborder="0" cellspacing="2" cellpadding="1">
