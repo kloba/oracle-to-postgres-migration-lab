@@ -111,19 +111,24 @@ just a language model's guess written to a file.
 
 A timelapse of the real run on 2026-09-04 — every frame is a screenshot taken while it happened,
 stamped with the wall-clock time it was taken. Three hours and twenty-one minutes from the first
-Oracle connection to **Migration Complete**, in twenty-six seconds.
+Oracle connection to **Migration Complete**, in nineteen seconds.
 
-![Timelapse of the conversion: Oracle connects, the schema is selected, Verify Extensions reports nine missing, the extensions are installed, the Foundry API key is refused by tenant policy, Entra ID is accepted, the project is created, extraction fails with ORA-00942, extraction succeeds after one grant, the conversion runs for nearly three hours, and finishes with 947 of 1,185 objects converted.](docs/images/migration-timelapse.gif)
+![Timelapse of the conversion: Oracle connects, the CONTOSO schema is selected, the PostgreSQL extensions are verified, Microsoft Foundry connects over Entra ID, the migration project is created, 1,299 objects are extracted from Oracle, the conversion runs for nearly three hours, and finishes with 947 of 1,185 objects converted.](docs/images/migration-timelapse.gif)
 
-<sub>Higher quality: [`docs/images/migration-timelapse.mp4`](docs/images/migration-timelapse.mp4) (26 s, 1200×798). Rebuild both with [`./docs/images/build-timelapse.py`](docs/images/build-timelapse.py) — the frames it composes are the committed screenshots in [`docs/images/screenshots/`](docs/images/screenshots/README.md).</sub>
+<sub>Higher quality: [`docs/images/migration-timelapse.mp4`](docs/images/migration-timelapse.mp4) (19 s, 1200×798). Rebuild both with [`./docs/images/build-timelapse.py`](docs/images/build-timelapse.py) — the frames it composes are the committed screenshots in [`docs/images/screenshots/`](docs/images/screenshots/README.md).</sub>
 
-**It is not a success reel, and that is the point.** Two of the eleven frames are failures — the
-Foundry API key refused by a tenant policy, and an `Extraction Failed` banner whose entire message
-is the words "Extraction Failed". Both were real, both cost real time, and both are written up with
-their fixes in [docs/images/screenshots/](docs/images/screenshots/README.md). The final number,
-**947 of 1,185 objects (79.92%)**, is a *lower bound*: roughly four fifths of the failures the tool
-reports are scratch-database timeouts and lock contention rather than bad translations, and the run
-had to be unwedged by hand twice. The full analysis is in
+That is the working path, and it is the path you get if you follow this repository today. Getting
+there took three detours that are not in the animation — a tenant policy that refuses Foundry API
+keys, an extension allowlist that had never actually been installed from, and a missing Oracle
+grant that ended a run with `0 extracted` behind a two-word error. All three were **this lab's
+configuration rather than the tool**, all three are fixed here, and all three are written up with
+their causes and fixes in [docs/images/screenshots/](docs/images/screenshots/README.md).
+
+One number deserves its caveat up front: **947 of 1,185 objects (79.92%)** is a *lower bound*.
+Roughly four fifths of the failures the tool reports are scratch-database timeouts and lock
+contention rather than bad translations, and the run had to be unwedged by hand twice. Tables,
+sequences and types converted at 100%, functions and indexes at 97%. The full analysis, including
+the split by programmable, non-programmable and package objects, is in
 [docs/conversion-report/](docs/conversion-report/README.md).
 
 ---

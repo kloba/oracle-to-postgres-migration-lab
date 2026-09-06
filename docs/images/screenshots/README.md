@@ -281,9 +281,12 @@ notification badges and meeting reminders out of a public repository. One earlie
 screenshot leaked a machine hostname in a terminal prompt and had to be recropped.
 Check anything you add here the same way before committing it.
 
-These eleven frames are also assembled into the timelapse embedded at the top of
-the [README](../../../README.md#the-migration-end-to-end). If you add or replace a
-screenshot here, rebuild it:
+Eight of these frames are assembled into the timelapse embedded at the top of the
+[README](../../../README.md#the-migration-end-to-end) — the working path, without
+the three detours above, because a red "connection test failed" banner in the
+README's first animation would say the tool is broken when the cause was our own
+tenant policy. The detours stay documented here, which is where someone hitting
+one of them will actually look. If you add or replace a screenshot, rebuild it:
 
 ```bash
 ./docs/images/build-timelapse.py

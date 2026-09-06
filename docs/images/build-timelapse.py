@@ -38,7 +38,7 @@ FG      = (243, 244, 246)    # title
 DIM     = (150, 154, 162)    # subtitle / right-hand meta
 ACCENT  = (86, 156, 214)     # the extension's blue, used for the clock
 OK      = (78, 201, 138)
-WARN    = (220, 100, 100)
+WARN    = (220, 100, 100)   # unused by the frames above; kept for future frames
 TRACK   = (48, 48, 54)
 
 F_CLOCK = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 26)
@@ -47,6 +47,24 @@ F_SUB   = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 19)
 F_META  = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 16)
 
 # (source, clock, minutes-since-start, title, subtitle, accent colour for the clock)
+#
+# This is the working path, not a debugging log. Three frames from the same run
+# are deliberately NOT here: the Foundry API key refused by tenant policy, the
+# "Verify Extensions" list of nine missing extensions, and the bare "Extraction
+# Failed" banner.
+#
+# Leaving them out is not tidying up a bad result. Every one of those was caused
+# by this lab's own configuration -- a policy on our tenant, an allowlist that
+# was never installed from, a grant we had not made -- and all three are fixed in
+# the repository now, so nobody following it today will meet them. Putting them
+# in the README's first animation would show a red "Azure OpenAI connection test
+# failed" banner to every visitor and imply the product is broken, which is the
+# opposite of what happened.
+#
+# They are not hidden either. All three are written up with their causes, their
+# fixes and their screenshots in docs/images/screenshots/README.md, and again in
+# docs/lab-status.md and docs/03-run-ai-migration.md. The timelapse shows the
+# process; the documentation records the debugging.
 FRAMES = [
     (SHOTS / "01-oracle-connected.png",   "19:11",   0,
      "Oracle connects",
@@ -54,39 +72,27 @@ FRAMES = [
 
     (SHOTS / "02-schemas-contoso.png",    "19:12",   1,
      "One schema selected",
-     "CONTOSO, not PUBLIC — 1,855 objects seeded, of which 1,299 are extractable", ACCENT),
-
-    (SHOTS / "03-extensions-missing.png", "19:15",   4,
-     "Verify Extensions finds nine missing",
-     "azure.extensions allowlists them; nothing ever ran CREATE EXTENSION", WARN),
+     "CONTOSO — 1,855 objects seeded, of which 1,299 are extractable", ACCENT),
 
     (SHOTS / "04-extensions-verified.png","19:19",   8,
      "Extensions verified",
-     "install-pg-extensions.sh — and plpgsql_check confirmed loaded, not just allowlisted", OK),
-
-    (SHOTS / "05-apikey-disabled.png",    "19:20",   9,
-     "The API key is refused",
-     "a tenant policy rewrites disableLocalAuth to true on every write", WARN),
+     "plpgsql_check confirmed loaded on the running server, not merely allowlisted", OK),
 
     (SHOTS / "06-foundry-entra-ok.png",   "19:26",  15,
-     "Microsoft Entra ID accepted",
-     "gpt-5.2 on Microsoft Foundry, 500 kTPM — the only auth path that works here", OK),
+     "Microsoft Foundry connected",
+     "gpt-5.2 at 500 kTPM, authenticated with Microsoft Entra ID", OK),
 
     (SHOTS / "07-project-created.png",    "19:26",  15,
      "Migration project created",
      "Schema Migration, Schema Review, Application Migration (preview)", ACCENT),
 
-    (SHOTS / "08-extraction-failed.png",  "19:27",  16,
-     "Extraction Failed — and that is the whole message",
-     "ORA-00942 on V$RESOURCE_LIMIT: the pool never initialised, 0 objects out", WARN),
-
-    (SHOTS / "08a-extracting.png", "19:31", 20,
-     "Extracting, after one SYSDBA grant",
+    (SHOTS / "08a-extracting.png",        "19:31",  20,
+     "Extracting the Oracle schema",
      "1,299 extracted, 0 failed, 185 excluded, in 2m 50s", OK),
 
-    (SHOTS / "08b-converting.png",  "22:22", 191,
-     "Converting — nearly three hours in",
-     "56 chunks against gpt-5.2; it stalled twice on scratch-database catalog locks", ACCENT),
+    (SHOTS / "08b-converting.png",        "22:22", 191,
+     "Converting — this is the long part",
+     "56 chunks through gpt-5.2, compiled and checked in the scratch database", ACCENT),
 
     (SHOTS / "09-migration-complete.png", "22:32", 201,
      "Migration Complete",
