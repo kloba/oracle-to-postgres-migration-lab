@@ -1,6 +1,6 @@
 # Lab status — what is verified and what is not
 
-**Last updated: 2026-09-05.**
+**Last updated: 2026-09-07.**
 
 This document exists so you know how much to trust the rest of this repository. It separates
 **what has actually been executed and observed** from **what has only been written down**. Where

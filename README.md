@@ -119,8 +119,9 @@ Oracle connection to **Migration Complete**, in nineteen seconds.
 
 That is the working path, and it is the path you get if you follow this repository today. Getting
 there took three detours that are not in the animation — a tenant policy that refuses Foundry API
-keys, an extension allowlist that had never actually been installed from, and a missing Oracle
-grant that ended a run with `0 extracted` behind a two-word error. All three were **this lab's
+keys, an extension allowlist that had never actually been installed from, and a conversion pointed
+at the schema owner instead of the reader account, which ended a run with `0 extracted` behind a
+two-word error. All three were **this lab's
 configuration rather than the tool**, all three are fixed here, and all three are written up with
 their causes and fixes in [docs/images/screenshots/](docs/images/screenshots/README.md).
 

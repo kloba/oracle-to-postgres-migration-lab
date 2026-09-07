@@ -949,15 +949,15 @@ SYSDBA
     if [[ "$rc" -eq 0 ]] && ! grep -qE '^(ORA-|PLS-)[0-9]' "$log" 2>/dev/null; then
         printf '%10s  %sok%s\n' '-' "$C_GREEN" "$C_RESET"
     else
-        printf '%10s  %sFAIL%s\n' '-' "$C_RED" "$C_RESET"
-        printf '       %sconnecting the tool as %s will fail at pool init with ORA-00942;%s\n' "$C_RED" "$CONTOSO_SCHEMA" "$C_RESET"
-        printf '       %suse %s instead, or grant it by hand:%s\n' "$C_RED" "${ORACLE_MIGRATION_USER:-O2P_READER}" "$C_RESET"
-        # shellcheck disable=SC2016  # v_$resource_limit is Oracle syntax, not a shell
-        # variable. The dollar sign belongs to the view name and must reach the reader
-        # verbatim, so single quotes are correct here and SC2016 is a false positive.
-        printf '       %s  GRANT SELECT ON sys.v_$resource_limit TO %s;%s\n' "$C_DIM" "$CONTOSO_SCHEMA" "$C_RESET"
+        # A skip, not a failure. This grant only matters if you choose to drive the
+        # conversion as the schema owner; the documented account is
+        # ${ORACLE_MIGRATION_USER}, which create_reader_account() gives dictionary
+        # access of its own. Failing the whole seed over a convenience would be the
+        # same overreaction that made us misdiagnose this in the first place.
+        printf '%10s  %sskip%s\n' '-' "$C_YELLOW" "$C_RESET"
+        printf '       %sdriving the tool as %s would fail at pool init with ORA-00942;%s\n' "$C_DIM" "$CONTOSO_SCHEMA" "$C_RESET"
+        printf '       %suse %s instead - that account is unaffected%s\n' "$C_DIM" "${ORACLE_MIGRATION_USER:-O2P_READER}" "$C_RESET"
         printf '       %ssee %s%s\n' "$C_DIM" "${log#"$REPO_ROOT"/}" "$C_RESET"
-        FAILED=$(( FAILED + 1 ))
     fi
 }
 
