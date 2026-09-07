@@ -154,7 +154,7 @@ if [[ "$AZURE_ONLY" -eq 0 ]]; then
         info "docker not installed"
     fi
 
-    GEN_DIR="${GEN_OUTPUT_DIR:-${REPO_ROOT}/generated}"
+    GEN_DIR="${GEN_OUTPUT_DIR:-${REPO_ROOT}/generated}/oracle"
     case "$GEN_DIR" in ./*) GEN_DIR="${REPO_ROOT}/${GEN_DIR#./}" ;; esac
     if [[ -d "$GEN_DIR" ]]; then
         GEN_N="$(find "$GEN_DIR" -maxdepth 1 -type f -name '*.sql' 2>/dev/null | wc -l | tr -d ' ')"

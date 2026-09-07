@@ -184,7 +184,7 @@ how the tool treats the SQL form versus the procedural form of the same idea.
 ### 4.2 Circular foreign keys
 
 `region.manager_employee_id → employee` and `employee.store_id → store → region` form a cycle.
-Oracle tolerates this because constraints live in `04-constraints.sql`, applied after all tables
+Oracle tolerates this because constraints live in `03-constraints.sql`, applied after all tables
 exist. PostgreSQL tolerates it too, but the *ordering* of the generated DDL matters, and naive
 converters emit it in dependency order and fail. This is a cheap, realistic trap and it stays.
 

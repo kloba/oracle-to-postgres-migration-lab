@@ -21,10 +21,13 @@ CONTOSO                1,185         947             238        79.92%
 ```
 
 The **Conversion Summary** shown in VS Code reports 1,189 / 947 / 242 / 79.65% for
-the same session. Neither is wrong. The report counts each package **once**, the
-customer summary counts the **members inside** packages, and the two documents are
-regenerated at slightly different moments. `object_mapping_summary.csv` here is
-the member-level view: **2,507 rows, 1,376 converted, 1,131 not**.
+the same session. Neither is wrong, and both count each package **once** — they
+disagree only on how many package specs are folded into the total:
+`technical_conversion_report.md` says 90, `customer_summary.md` says 86. That
+4-object difference is the entire discrepancy (1,189 − 1,185 = 4, 242 − 238 = 4),
+and Converted is 947 in both. An earlier version of this page attributed it to
+member-level counting; that is the CSV, which is a different view again:
+**2,507 rows, 1,376 converted, 1,131 not**.
 
 By object type, from `technical_conversion_report.md`:
 
@@ -56,7 +59,7 @@ the reasons the tool gives for its own failures in `customer_summary.md`:
   4  deadlock
 ```
 
-Four fifths of the stated reasons are **timeouts and lock contention in the
+628 + 176 = 804 of 846, or **95%**, of the stated reasons are **timeouts and lock contention in the
 scratch database**, not bad translations. The compile-and-validate stage opens a
 transaction per object and holds it while the LLM fix call is in flight; with ~20
 chunks in flight against one scratch database they serialise on catalog locks.
@@ -71,10 +74,13 @@ active                Lock/transactionid    1   00:20:14
 Packages fare worst (30%) because a package body is many members, and one member
 timing out fails the whole body.
 
-**The run stalled twice and had to be unwedged by hand.** With `lock_timeout` set
-to `0` by the tool, one worker waited 20+ minutes on a peer that was itself parked
-idle-in-transaction, and PostgreSQL could not see it as a deadlock because the
-cycle ran through the client. Terminating the blocking backend released it and the
+**The run stalled twice and had to be unwedged by hand.** One worker waited 20+
+minutes on a peer that was itself parked idle-in-transaction, and PostgreSQL could
+not see it as a deadlock because the cycle ran through the client. (An earlier
+version of this page said the tool sets `lock_timeout = 0`. It does not — its
+shipped config documents 5000 ms for compile and 30000 ms for the resilience path,
+and the 176 `canceling statement due to lock timeout` failures above are that
+timeout firing, which could not happen at 0.) Terminating the blocking backend released it and the
 run resumed each time. Four terminations were performed across three hours. Some
 of the 238 failures are the direct cost of those terminations, and they cannot be
 separated from the rest — **treat this report as a lower bound on what the tool can

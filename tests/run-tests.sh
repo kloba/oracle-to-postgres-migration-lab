@@ -106,7 +106,7 @@ ${C_BOLD}OPTIONS${C_RESET}
                          auto-detected from the loaded data (verify-counts only).
                          0.01 = the CI smoke scale.
     --only <glob>        Run only checks whose name matches, e.g.
-                         --only 'bicep' or --only '*lint*'.
+                         --only 'bicep*' or --only 'shellcheck'.
     --strict             Treat SKIP as FAIL. Use in CI, where every tool is
                          installed on purpose and a silent skip is a lie.
     --list               List the checks that would run, then exit.
@@ -848,7 +848,21 @@ PRE
             fi
             record "$name" FAIL "${why:-sqlplus exit $rc}" "$ms"
         else
-            record "$name" PASS "all assertions passed" "$ms"
+            # A zero exit means nothing was ASSERTED false. It does not mean
+            # everything was checked: both SQL files degrade an assertion they
+            # could not evaluate to [ WARN ] and carry on, and every B2 integrity
+            # check in verify-counts.sql can take that path. Reporting those runs
+            # as "all assertions passed" is the same fail-open shape this lab
+            # exists to warn about, so count the warnings and say so.
+            local warned
+            # || true: grep -c exits 1 when the count is zero, and with
+            # `set -e` plus pipefail that would kill the harness on a clean run.
+            warned="$(grep -c '\[ WARN \]' "$log" 2>/dev/null | tr -d ' ' || true)"
+            if [[ "${warned:-0}" -gt 0 ]]; then
+                record "$name" PASS "0 failed, ${warned} not checked (see the log)" "$ms"
+            else
+                record "$name" PASS "all assertions passed" "$ms"
+            fi
         fi
     }
 

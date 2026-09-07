@@ -36,15 +36,15 @@ harness's own, with the tool named where the line alone would not say it:
 
 | Check | Result | Detail |
 | --- | --- | --- |
-| `bash-syntax` | PASS | 10 script(s) parse under `bash -n` |
-| `shellcheck` | PASS | 10 clean at `severity=warning`; under CI's `--strict`, 10 clean at `severity=style`. CI pins shellcheck v0.11.0 |
-| `exec-bits` | PASS | 10 script(s) executable |
+| `bash-syntax` | PASS | 11 script(s) parse under `bash -n` |
+| `shellcheck` | PASS | 11 clean at `severity=warning`; under CI's `--strict`, 11 clean at `severity=style`. CI pins shellcheck v0.11.0 |
+| `exec-bits` | PASS | 11 script(s) executable |
 | `bicep-build` | PASS | 8 template(s) compile |
-| `python-compile` | PASS | 3 file(s) compile |
+| `python-compile` | PASS | 4 file(s) compile |
 | `generator-determinism` | PASS | 13 file(s) byte-identical across two different `PYTHONHASHSEED`s |
 | `cloud-init-sync` | PASS | the installer embedded in `scripts/cloud-init/oracle-vm.yaml` is byte-identical to `scripts/install-oracle.sh` |
 | `diagram-sync` | PASS | 5 diagram(s) byte-identical to their `.dot` source. Added 2026-09-05 and it immediately found one `.png` that had been edited at source and never re-rendered |
-| `markdown-links` | PASS | 0 broken, of 138 relative link(s) and images checked in 14 file(s). The link count moves with every doc edit; the 0 is the claim |
+| `markdown-links` | PASS | 0 broken, of 147 relative link(s) and images checked in 14 file(s). The link count moves with every doc edit; the 0 is the claim |
 | `secret-scan` | PASS | no real GUIDs or tracked `.env` |
 | `verify-schema` | PASS (`--local`) | all assertions passed — `41 passed, 0 failed, 0 not checked` |
 | `verify-counts` | PASS (`--local`) | all assertions passed — `64 passed, 0 failed, 0 not checked (scale 0.01)` |
@@ -75,7 +75,7 @@ The full seed was executed end to end against a local Oracle Free 23ai container
 | Case | Construct | Observed |
 | --- | --- | --- |
 | H-19, H-20 | Partitioned tables | 5 |
-| H-18 | Index-organized tables | 4 |
+| H-18 | Index-organized tables | 3 (a 4th `user_tables` row is the system-generated overflow segment) |
 | H-21 | Global temporary tables | 3 |
 | H-15 | Materialised views + MV logs | 6 MVs, 3 logs |
 | H-03 | Object types + inheritance | 9 types, 2 subtypes |
@@ -90,12 +90,12 @@ The full seed was executed end to end against a local Oracle Free 23ai container
 | H-14 | Scheduler jobs | 10 |
 | H-40 | VPD policies | 3 |
 | H-02 | `PRAGMA AUTONOMOUS_TRANSACTION` | 3 program units |
-| H-06 | `CONNECT BY` in PL/SQL | 17 program units |
+| H-06 | `CONNECT BY` in PL/SQL | 21 program units |
 | H-24 | `RESULT_CACHE` | 12 program units |
 | T-07 | Quoted mixed-case table | 1 |
 
 All 43 hard-case IDs `H-01` … `H-43` are referenced in `src/oracle/`, and the hand-written sources
-carry **189 `MIGRATION NOTE` comments**. The generated corpus marks its embedded hard cases with
+carry **194 `MIGRATION NOTE` comments**. The generated corpus marks its embedded hard cases with
 `H-nn` references in file headers rather than the `MIGRATION NOTE` prefix — a different convention,
 not an absence.
 
@@ -186,7 +186,7 @@ All four were re-measured on 2026-09-02 against the local Oracle container, seed
 | `PACKAGE` 74 and `PACKAGE BODY` 74, against a design minimum of 85 | **90 and 90**, `ok` — 14 hand-written pairs plus 76 generated |
 | `B2-e` "no negative `qty_on_hand`" fails on 80 rows | **PASS** — `80 of 3200 negative (expect 80), 0 past -30` |
 | `B2-o` "every GL journal balances" reports 800 unbalanced of 801 rows | **PASS** — `0 unbalanced journals`. Queried straight at the database: 801 journals, 2,400 lines, 0 where `SUM(debit_amount) <> SUM(credit_amount)` |
-| `tests/run-tests.sh --local` exits non-zero | **Exits 0** — `10 passed, 0 failed, 0 skipped` (§1.1) |
+| `tests/run-tests.sh --local` exits non-zero | **Exits 0** — `12 passed, 0 failed, 0 skipped` (§1.1) |
 
 The cause was a stale record, not a late fix. The generator has budgeted **76** generated package
 pairs (60 nominal plus 16 supplemental) since the first commit. `B2-e` has been a *bounded*
@@ -230,10 +230,13 @@ The reports are committed: [docs/conversion-report/](conversion-report/README.md
 `PACKAGE_BODY` at **30%**.
 
 **Read the failure reasons before the percentage.** Counting the tool's own stated reasons: **628
-`chunk timeout`, 176 `lock timeout`, 38 `does not exist`, 4 `deadlock`**. Four fifths are timeouts
+`chunk timeout`, 176 `lock timeout`, 38 `does not exist`, 4 `deadlock`**. That is **95%** — timeouts
 and lock contention in the scratch database, not translation errors. The compile-and-validate stage
 holds a transaction open per object while its LLM fix call is in flight, and the tool sets
-`lock_timeout = 0`; with ~20 chunks in flight against one scratch database, workers serialise on
+a non-zero `lock_timeout` (its shipped config documents 5000 ms for compile and 30000 ms for the
+resilience path — an earlier version of this page said `0`, which the 176 `canceling statement due to
+lock timeout` failures themselves disprove, since that message requires a non-zero timeout to fire);
+with ~20 chunks in flight against one scratch database, workers serialise on
 catalog locks and the run **stalled twice** in a cycle PostgreSQL cannot detect as a deadlock
 because it runs through the client. Four backend terminations were needed to finish. Some of the 238
 failures are collateral from those terminations and cannot be separated from the rest, so **this
@@ -260,7 +263,8 @@ result is a lower bound on what the tool can do, not an upper one.**
    run with a two-word error.** The extractor sizes its Oracle connection pool from
    `V$RESOURCE_LIMIT` *before* enumerating anything. `CONTOSO` has no dictionary privileges, so that
    raised `ORA-00942` and the run ended `0 extracted, 0 failed, 0 excluded` behind a banner reading
-   only *Extraction Failed*, with the reason in a log the interface does not link to.
+   only *Extraction Failed*. The reason was one click away behind the dashboard's **View Logs** link,
+   which an earlier version of this page wrongly said did not exist.
 
    **This entry originally called `V$RESOURCE_LIMIT` an undocumented prerequisite. That was wrong,
    and the claim reached Microsoft before it was checked.** `O2P_READER` — which
@@ -282,13 +286,20 @@ the tool's own running estimate**, does land inside the documented $5–30.
 
 ## 2. NOT verified — do not assume these work
 
-The deployment ran and the resource group came up clean (§1.6–§1.8), but almost everything
-downstream of "the infrastructure exists" did not run. Do not let §1.6–§1.8 talk you into trusting
-any of the following.
+### 2.1 What the deployment did not exercise — mostly superseded (2026-09-04)
 
-### 2.1 What the deployment did *not* exercise
+**This section described the state after the 2026-09-02 deployment and was left stale for three
+days after §1.10 contradicted it.** The 2026-09-04 run drove the infrastructure end to end: the
+Oracle VM reached `DATABASE IS READY TO USE!`, `scripts/seed-oracle.sh --azure` loaded `CONTOSO`,
+and `connect.sh` and `status.sh` were both exercised against the live resources. Treat §1.10 as the
+current record.
 
-The infrastructure stood up; nothing was driven through it.
+What genuinely remains unexercised is narrower, and is listed in §2.2 and §2.3: the converted DDL
+has never been deployed, no data has been migrated, and the report has never been compared against
+the predictions.
+
+<details><summary>The original 2026-09-02 text, kept because deleting a superseded claim is how a
+status page stops being trustworthy</summary>
 
 - **The Oracle VM was created and booted, but was never confirmed to reach a working database.**
   cloud-init started, but nobody watched it through to `DATABASE IS READY TO USE!`, and `CONTOSO`
@@ -306,6 +317,8 @@ later renamed it to `outputs.json.stale` — so the Bicep output names the scrip
 `oracleAdminUsername`, `resourceGroupName`) really are produced, not just declared. That is more
 than the old static consistency check, but it is still not evidence that `connect.sh`, `status.sh`,
 or a seed against the VM works.
+
+</details>
 
 ### 2.2 The conversion's *results* have not been checked against the predictions
 

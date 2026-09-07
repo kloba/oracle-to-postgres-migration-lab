@@ -60,7 +60,7 @@ Pass the same `--scale` you seeded with. The row-count minimums scale with it.
 | Flag | Effect |
 | --- | --- |
 | `--list` | Show the checks that would run, then exit. |
-| `--only <glob>` | Run a subset: `--only bicep`, `--only 'verify-*'`, `--only '*lint*'`. |
+| `--only <glob>` | Run a subset. It is a **glob against the whole check name**, so `--only bicep` matches nothing — use `--only 'bicep*'`, `--only shellcheck`, or `--only 'verify-*'` (which needs `--local`/`--azure`). No match is an error, not an empty run. |
 | `--strict` | Treat `SKIP` as a failure. CI uses this — every tool is installed there on purpose, so a silent skip would be a lie. |
 | `--scale <n>` | Row-count multiplier. `0.01` is the CI smoke scale, `1` is the full lab. |
 | `VERBOSE=1` | Environment variable. Show every check's full output. |
@@ -135,8 +135,9 @@ oracle-to-postgres-migration-lab/
 └── out/                       gitignored — logs, converted DDL, conversion reports
 ```
 
-> **A note on `src/oracle/` versus `sql/`.** `docs/design.md` section 3 specifies `sql/`.
-> The tree above records where the files actually are today. `scripts/seed-oracle.sh` and the
+> **A note on `src/oracle/` versus `sql/`.** An earlier version of this note said `docs/design.md`
+> section 3 specifies `sql/`. It does not — design.md section 3 specifies `src/oracle/` and says so
+> explicitly. The tree above and the contract agree. `scripts/seed-oracle.sh` and the
 > test harness accept **either** location, so both work; if you move them, move them wholesale
 > and update design.md in the same pull request.
 

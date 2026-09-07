@@ -441,9 +441,11 @@ PGHOST=127.0.0.1 PGPORT=15432 ./scripts/install-pg-extensions.sh    # over a tun
 `deploy.sh` attempts this for you and reports it as a step to do later when it cannot reach the
 server, which from a laptop is the normal case: the flexible server is private-access only.
 
-Two details worth knowing before you run it. `fuzzystrmatch` cannot be allowlisted by name on Azure
-— a direct `CREATE EXTENSION fuzzystrmatch` is refused — but `CASCADE` pulls it in as a dependency
-of `postgis_tiger_geocoder`, which Azure does permit, so the script uses `CASCADE` throughout. And
+Two details worth knowing before you run it. `fuzzystrmatch` is **supported** on Azure Database for
+PostgreSQL flexible server (1.2 on PG 16), but it has never been in this lab's `azure.extensions`
+value, so a direct `CREATE EXTENSION fuzzystrmatch` is refused by the allowlist; `CASCADE` pulls it
+in as a dependency of `postgis_tiger_geocoder`, so the script uses `CASCADE` throughout. An earlier
+version of this page blamed Azure for that refusal, which was wrong. And
 the script finishes by asking the *running server* `SHOW shared_preload_libraries` rather than asking
 ARM whether a restart is pending, because ARM is the control plane's opinion and `plpgsql_check`
 fails open.
@@ -605,7 +607,7 @@ tunnel down on exit.
 | `QuotaExceeded` partway through | Quota check skipped or region changed after preflight | `./scripts/preflight.sh --region <region>`, then request quota or resize |
 | `SkuNotAvailable` on the PostgreSQL server | That SKU is not offered in your region | `az postgres flexible-server list-skus --location <region> -o table`, then set `PG_SKU_NAME` (and `PG_SKU_TIER`) in `.env` — `deploy.sh` forwards both to the template when they are non-empty |
 | Model deployment fails with a capacity error | No TPM quota for that model in that region | Lower `FOUNDRY_TPM_QUOTA`, switch to `gpt-5-mini`, or set `FOUNDRY_LOCATION` |
-| `name is already in use` with nothing visible in the portal | Key Vault and Foundry accounts are **soft-deleted**, not deleted | `./scripts/destroy.sh --purge`, or purge by hand |
+| `name is already in use` with nothing visible in the portal | Key Vault and Foundry accounts are **soft-deleted**, not deleted | `./scripts/destroy.sh` already purges by default; if you used `--no-purge`, purge by hand |
 | `AzureBastionSubnet` invalid | Subnet too small or misnamed | It must be exactly that name and /26 or larger. The template already does this |
 | Oracle connection refused on 1521 after a successful deploy | cloud-init is still running | `sudo cloud-init status --wait` on the VM. 10–20 minutes |
 | `psql` cannot resolve the PostgreSQL FQDN from your laptop | Private access only, by design | Connect from the jumpbox or the Oracle VM |
@@ -659,7 +661,8 @@ it.
 | `-y`, `--yes` | Skip the typed confirmation. For CI and for the very sure |
 | `--resource-group <name>` | Delete a different group than `AZ_RESOURCE_GROUP` |
 | `--no-wait` | Start the delete and stop watching. It still completes |
-| `--purge` | Also purge the soft-deleted Key Vault and Foundry account. Use this if you will redeploy with the same names |
+| `--no-purge` | **Leave** the soft-deleted Key Vault and Foundry account behind. Purging is the **default**, because a soft-deleted Foundry account blocks the next deploy with `FlagMustBeSetForRestore` |
+| `--purge` | Accepted and ignored — it names the default. An earlier version of this table described it as opt-in |
 
 It touches nothing local: your Docker container, `generated/`, `out/` and `.env` all survive.
 

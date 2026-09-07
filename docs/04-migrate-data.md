@@ -105,12 +105,23 @@ sudo apt-get update
 sudo apt-get install -y ora2pg libdbd-pg-perl postgresql-client
 ```
 
-`DBD::Oracle` needs Oracle client libraries. The lab's VM already has the Oracle Free container, so
-the simplest route is to run `ora2pg` **inside** it, where `ORACLE_HOME` is already set:
+`DBD::Oracle` needs Oracle client libraries, and this is the part that bites.
 
-```bash
-sudo docker exec -it o2p-oracle bash -lc 'ora2pg --version'
-```
+**The Oracle Free container does not contain `ora2pg`, and nothing in this lab installs it there.**
+An earlier version of this page suggested running it inside the container "where `ORACLE_HOME` is
+already set" — `docker exec o2p-oracle ora2pg --version` returns `command not found`. The container
+has the Oracle libraries but not the tool; the VM has neither by default.
+
+So you have two honest options, and both are work:
+
+- **Install `ora2pg` on the VM** with the `apt-get` line above, then give `DBD::Oracle` an Oracle
+  client — either Instant Client from Oracle, or by pointing it at the libraries inside the
+  container image.
+- **Build a derived image** that adds `ora2pg` and `DBD::Oracle` on top of the Oracle Free image,
+  and run that.
+
+Neither has been executed in this lab. `docs/lab-status.md` §2.3 records that `ora2pg` has never
+been run and `tools/ora2pg.conf` is untested; treat this section as a design, not a transcript.
 
 Whichever host you choose, confirm both directions before you start a long copy:
 

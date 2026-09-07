@@ -67,7 +67,7 @@ DECLARE
    -- correctly when a human executes it by hand, with no DEFINEs set.
    -- ---------------------------------------------------------------------
    c_object_floor  CONSTANT PLS_INTEGER := 1000;   -- OBJECT_COUNT_FLOOR
-   c_object_target CONSTANT PLS_INTEGER := 1110;   -- reported, not asserted
+   c_object_target CONSTANT PLS_INTEGER := 1120;   -- reported, not asserted
 
    v_failures      PLS_INTEGER := 0;
    v_count         PLS_INTEGER;
@@ -224,8 +224,11 @@ BEGIN
    END;
 
    -- H-03 / H-04 / H-05  object types with bodies, VARRAYs, nested tables
-   SELECT COUNT(*) INTO v_count FROM user_types;
-   present('H-03', 'object types', v_count, 15, 'types');
+   -- typecode = 'OBJECT': user_types also holds the VARRAY and nested-table
+   -- collections counted by H-04/H-05 below, so an unfiltered count labelled
+   -- "object types" double-counts them and cannot fail.
+   SELECT COUNT(*) INTO v_count FROM user_types WHERE typecode = 'OBJECT';
+   present('H-03', 'object types', v_count, 6, 'types');
 
    SELECT COUNT(*) INTO v_count FROM user_types WHERE typecode = 'COLLECTION';
    present('H-04', 'collection types (VARRAY, nested table)', v_count, 4, 'types');
@@ -238,7 +241,7 @@ BEGIN
    present('H-27', 'INSTEAD OF triggers', v_count, 3, 'triggers');
 
    -- H-17  virtual columns, H-16 function-based indexes
-   SELECT COUNT(*) INTO v_count FROM user_tab_cols WHERE virtual_column = 'YES';
+   SELECT COUNT(*) INTO v_count FROM user_tab_cols WHERE virtual_column = 'YES' AND hidden_column = 'NO';
    present('H-17', 'virtual columns', v_count, 9, 'columns');
 
    SELECT COUNT(*) INTO v_count FROM user_indexes WHERE index_type LIKE 'FUNCTION-BASED%';

@@ -69,10 +69,12 @@ Fixed by `scripts/install-pg-extensions.sh` (new), plus `tablefunc` added to
 `infra/modules/postgres-flex.bicep`. `04-extensions-verified.png` is the same
 button afterwards: **✓ Extensions Verified**.
 
-A detail that cost a few minutes: `fuzzystrmatch` cannot be allowlisted by name
-on Azure — a direct `CREATE EXTENSION fuzzystrmatch` is refused — but `CASCADE`
-pulls it in as a dependency of `postgis_tiger_geocoder`, which Azure permits. The
-script uses `CASCADE` throughout.
+A detail that cost a few minutes: a direct `CREATE EXTENSION fuzzystrmatch` was
+refused, but `CASCADE` pulls it in as a dependency of `postgis_tiger_geocoder`. The
+cause is **this lab's allowlist, not Azure** — `fuzzystrmatch` is supported on
+flexible server (1.2 on PG 16) and has simply never been in our
+`extensionsAllowlist`. An earlier version of this page blamed Azure for it. The
+script uses `CASCADE` throughout, which works either way.
 
 **A third fault the same check exposed.** With extensions installed, the running
 server still reported
@@ -82,11 +84,12 @@ shared_preload_libraries = pg_cron,pg_stat_statements,azure,pg_qs,…
 ```
 
 — no `plpgsql_check`, no `pg_partman_bgw`, on a server ARM described as
-`isConfigPendingRestart: true`. `deploy.sh` performs that restart and `status.sh`
-asserts the ARM flag, and yet the live server had never loaded the library. That
-is the lab's own fail-open trap, one level up: **ARM's answer is not the
-server's.** `install-pg-extensions.sh` now finishes by asking the server itself,
-`SHOW shared_preload_libraries`.
+`isConfigPendingRestart: true`. **ARM was telling the truth**: that flag means the
+static parameter was written but not yet in effect, which is exactly what the
+server reported. The documented restart simply had not been applied to this
+deployment. An earlier version of this page read it as "ARM's answer is not the
+server's", which was wrong — they agreed. `install-pg-extensions.sh` still asks the
+server directly with `SHOW shared_preload_libraries`, as belt and braces.
 
 ### 3. The API Key box is a trap — `05-apikey-disabled.png` → **defect 2**
 
@@ -124,7 +127,8 @@ the role is never used.
 ### 4. Extraction Failed, with nothing on screen to say why — `08-extraction-failed.png` → **defect 3**
 
 Clicking **Migrate** produced a red banner reading, in full, *Extraction Failed*.
-No detail, no log link. The reason was in
+No detail on the banner itself — though the dashboard's **View Logs** link does open the file, which
+an earlier version of this page denied. The reason was in
 `artifacts/oracle/CONTOSO/extract/internal/logs/extraction.log`:
 
 ```text

@@ -280,14 +280,20 @@ END;
 --------------------------------------------------------------------------------
 -- SELECT on the V$ dynamic performance views.
 --
--- Same SYS-only story as DBMS_RLS above, but this one is not about a hard case
--- -- it decides whether the conversion tool runs at all.
+-- Same SYS-only story as DBMS_RLS above. This is a CONVENIENCE, not a
+-- requirement of the conversion tool.
 --
--- The VS Code extension's extractor sizes its Oracle connection pool from
+-- The extension's extractor sizes its Oracle connection pool from
 -- V$RESOURCE_LIMIT, in auto_detect_workers(), BEFORE it enumerates a single
--- object. Without the privilege that query raises ORA-00942 and the whole run
--- ends "Extraction Failed ... 0 extracted, 0 failed, 0 excluded" with nothing
--- in the UI to explain why. A real run of this lab failed exactly that way.
+-- object. Connect as CONTOSO -- the schema owner, which holds no dictionary
+-- privileges -- and that raises ORA-00942 and the run ends "Extraction Failed
+-- ... 0 extracted". A real run of this lab failed exactly that way.
+--
+-- But the documented account is O2P_READER, which seed-oracle.sh and
+-- install-oracle.sh both create with SELECT_CATALOG_ROLE and SELECT ANY
+-- DICTIONARY -- either of which already covers the V$ views. Verified
+-- 2026-09-07. So this grant only matters if you choose to drive the tool as
+-- the schema owner, and its absence costs you nothing otherwise.
 --
 -- V_$RESOURCE_LIMIT, not V$RESOURCE_LIMIT: the V$ names are public synonyms and
 -- you cannot grant on a synonym. The view returns zero rows inside a PDB, which
@@ -322,7 +328,7 @@ BEGIN
   END IF;
 
   DBMS_OUTPUT.PUT_LINE(RPAD('=', 74, '='));
-  DBMS_OUTPUT.PUT_LINE('WARNING - the conversion tool will not run');
+  DBMS_OUTPUT.PUT_LINE('NOTE - optional grant not made');
   DBMS_OUTPUT.PUT_LINE('');
   DBMS_OUTPUT.PUT_LINE(l_failed || ' of ' || l_views.COUNT || ' V$ grants could not be made from');
   DBMS_OUTPUT.PUT_LINE('here. Only SYS can grant on SYS-owned views when');
@@ -338,10 +344,10 @@ BEGIN
   DBMS_OUTPUT.PUT_LINE('Run it AFTER this file, never before: this script drops and');
   DBMS_OUTPUT.PUT_LINE('recreates CONTOSO, which would discard the grant.');
   DBMS_OUTPUT.PUT_LINE('');
-  DBMS_OUTPUT.PUT_LINE('Unlike the DBMS_RLS grant above, this one is not optional. Without');
-  DBMS_OUTPUT.PUT_LINE('it the extractor fails at pool initialisation with ORA-00942 and');
-  DBMS_OUTPUT.PUT_LINE('extracts nothing at all - you lose the entire conversion, not one');
-  DBMS_OUTPUT.PUT_LINE('hard case. The schema itself still builds, which is why this is a');
+  DBMS_OUTPUT.PUT_LINE('This only matters if you drive the conversion as CONTOSO. The');
+  DBMS_OUTPUT.PUT_LINE('documented account, O2P_READER, holds SELECT_CATALOG_ROLE and');
+  DBMS_OUTPUT.PUT_LINE('SELECT ANY DICTIONARY and is unaffected. The schema itself builds');
+  DBMS_OUTPUT.PUT_LINE('either way, which is why this is a');
   DBMS_OUTPUT.PUT_LINE('warning here and a hard error in seed-oracle.sh.');
   DBMS_OUTPUT.PUT_LINE(RPAD('=', 74, '='));
 END;

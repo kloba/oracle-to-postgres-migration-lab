@@ -60,7 +60,7 @@ DECLARE
    -- edit rather than a hunt through the script.
    -- -------------------------------------------------------------------
    k_object_floor   CONSTANT PLS_INTEGER := 1000;   -- .env OBJECT_COUNT_FLOOR
-   k_object_target  CONSTANT PLS_INTEGER := 1110;   -- design.md section 8 total
+   k_object_target  CONSTANT PLS_INTEGER := 1120;   -- design.md section 8 total
    k_generated_min  CONSTANT PLS_INTEGER := 792;    -- generate-objects.py GEN_OBJECT_TARGET
    k_max_listed     CONSTANT PLS_INTEGER := 25;     -- cap on detail listings
 
@@ -386,7 +386,10 @@ BEGIN
    END;
 
    -- H-18  index-organized tables
-   SELECT COUNT(*) INTO v_count FROM user_tables WHERE iot_type IS NOT NULL;
+   -- iot_type = 'IOT', not IS NOT NULL: an IOT with an overflow segment adds a
+   -- second user_tables row (iot_type = 'IOT_OVERFLOW'), which made this report
+   -- 4 IOTs when the schema has 3.
+   SELECT COUNT(*) INTO v_count FROM user_tables WHERE iot_type = 'IOT';
    assert('A6-b', 'index-organized tables (H-18)', v_count >= 3,
           v_count || ' IOTs');
 
@@ -468,13 +471,30 @@ BEGIN
       warn('A6-n', 'scheduler jobs (H-14)', SQLERRM);
    END;
 
-   -- H-40  Virtual Private Database. user_policies needs EXECUTE on DBMS_RLS
-   -- and the policies to have been added; a privilege error here is a WARN,
-   -- because "I could not look" is not "it is not there".
+   -- H-40  Virtual Private Database.
+   --
+   -- This used to assert v_count >= 2 and catch exceptions, on the theory that a
+   -- missing DBMS_RLS grant would raise. It does not: user_policies is readable
+   -- by anyone and simply returns no rows, so the EXCEPTION arm was unreachable
+   -- and the assert failed hard instead.
+   --
+   -- Hard-failing here contradicts the rest of the lab. 00-user-tablespace.sql
+   -- says in as many words that EXECUTE ON SYS.DBMS_RLS can only be granted by
+   -- SYS, that seed-oracle.sh makes it best-effort, and that losing it costs the
+   -- VPD hard case "only ... deliberately NOT fatal". A configuration the seed
+   -- documents as supported must not fail the test suite.
+   --
+   -- So: value-based, and a WARN, matching 99-verify-objects.sql. Zero policies
+   -- means the grant was skipped, which is a known and survivable state; it is
+   -- not evidence that the schema is broken.
    BEGIN
       EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM user_policies' INTO v_count;
-      assert('A6-o', 'VPD policies (H-40)', v_count >= 2,
-             v_count || ' policies');
+      IF v_count >= 2 THEN
+         assert('A6-o', 'VPD policies (H-40)', TRUE, v_count || ' policies');
+      ELSE
+         warn('A6-o', 'VPD policies (H-40)',
+              v_count || ' policies - needs GRANT EXECUTE ON SYS.DBMS_RLS as SYSDBA');
+      END IF;
    EXCEPTION WHEN OTHERS THEN
       warn('A6-o', 'VPD policies (H-40)', SQLERRM);
    END;

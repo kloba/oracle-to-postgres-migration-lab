@@ -126,7 +126,7 @@ configuration rather than the tool**, all three are fixed here, and all three ar
 their causes and fixes in [docs/images/screenshots/](docs/images/screenshots/README.md).
 
 One number deserves its caveat up front: **947 of 1,185 objects (79.92%)** is a *lower bound*.
-Roughly four fifths of the failures the tool reports are scratch-database timeouts and lock
+**95%** of the failure reasons the tool states are scratch-database timeouts and lock
 contention rather than bad translations, and the run had to be unwedged by hand twice. Tables,
 sequences and types converted at 100%, functions and indexes at 97%. The full analysis, including
 the split by programmable, non-programmable and package objects, is in
@@ -156,7 +156,7 @@ the split by programmable, non-programmable and package objects, is in
 
 ## What is in the schema
 
-`CONTOSO` is a retail ERP for a chain of ~1,400 stores across 11 countries: product catalogue,
+`CONTOSO` is a retail ERP for a chain of 5,600 stores across 40 countries at the default scale: product catalogue,
 stores, inventory, customers, loyalty, orders, fulfilment, returns, pricing and promotions,
 suppliers, purchase orders, and a general ledger.
 
@@ -299,7 +299,7 @@ Realistic, assuming things mostly work. First time through, add reading time.
 | Seed Oracle (`--scale 0.01`) | [02](docs/02-seed-oracle.md) | 1 min | 2–3 min | Local smoke test, ~3 min measured; slower on Azure over the tunnel |
 | Seed Oracle (`--scale 1`) | [02](docs/02-seed-oracle.md) | 2 min | 35–50 min | The real thing |
 | Client setup | [00](docs/00-prerequisites.md) | 20 min | 10 min | VS Code + extension + Copilot sign-in on the jumpbox |
-| Run the conversion | [03](docs/03-run-ai-migration.md) | 15 min | 45–90 min | ~1,480 convertible objects at 500,000 TPM. Much longer on lower quota |
+| Run the conversion | [03](docs/03-run-ai-migration.md) | 15 min | **2h 56m measured** | 45–90 min is the best case quoted for smaller schemas. The one measured run on ~1,300 objects at 500,000 TPM took 2h 56m and stalled twice — see [lab-status §1.10](docs/lab-status.md) |
 | Work the review tasks | [03](docs/03-run-ai-migration.md) | **3–8 h** | — | The actual lab. Roughly a dozen genuinely hard items |
 | Migrate the data | [04](docs/04-migrate-data.md) | 20 min | 30–90 min | `ora2pg` at scale 1. The `LONG` column will cost you some of this |
 | Validate | [05](docs/05-validate.md) | 1–2 h | 15 min | Differential testing is where the interesting findings are |
@@ -392,7 +392,7 @@ re-seed.
 | [Architecture](docs/architecture.md) | Why an Oracle VM, why a separate scratch database, how the conversion pipeline really works, and where the human stays in the loop |
 | [Design contract](docs/design.md) | The binding specification: naming, the full table catalogue, all 43 hard cases with predictions, the object budget |
 | [Troubleshooting](docs/troubleshooting.md) | Symptom → cause → fix, across every stage |
-| [Lab status](docs/lab-status.md) | **Read before spending money.** What has been verified by actual execution versus what is written but untested — the Azure infrastructure has now been deployed for real once and torn down (2026-09-02), but the conversion run itself still never has |
+| [Lab status](docs/lab-status.md) | **Read before spending money.** What has been verified by actual execution versus what is written but untested — infrastructure deployed and destroyed (2026-09-02), and the conversion driven end to end (2026-09-04). Still open: comparing the report against the 43 predictions, and migrating any data |
 
 ---
 

@@ -634,7 +634,8 @@ which **no `.sql` file recreates either**:
 - **The `CONTOSO_EXPORT_DIR` directory object.** It lives at database level, and it is created
   (`CREATE OR REPLACE DIRECTORY`) by `scripts/install-oracle.sh`, not by any file in `src/oracle/`.
   Harmless to leave in place — dropping `CONTOSO` only removes its `READ`/`WRITE` grant on it.
-- **The `O2P_READER` account.** Also created by `scripts/install-oracle.sh`.
+- **The `O2P_READER` account.** Created by `scripts/install-oracle.sh` on the Azure path and by
+  `scripts/seed-oracle.sh` (`create_reader_account`) on both paths, so a local seed has it too.
 
 If you dropped either by hand, re-run `scripts/install-oracle.sh` rather than looking for a SQL file
 that recreates them. `src/oracle/00-user-tablespace.sql` grants `CREATE ANY DIRECTORY` to `CONTOSO`

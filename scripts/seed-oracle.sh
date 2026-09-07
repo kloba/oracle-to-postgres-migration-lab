@@ -323,14 +323,25 @@ if [[ "$NO_GENERATE" -eq 0 ]] && ! data_sql_present && [[ -f "$DATA_GENERATOR" ]
     # this script's own --scale carries. Map one onto the other rather than
     # passing a number argparse would reject.
     if gen_supports '\-\-scale[ =]'; then
-        if gen_supports 'small,medium,large'; then
-            case "$SCALE" in
-                0|0.0*|0.1|.1|.0*) DATA_SCALE='small'  ;;
-                1|1.*|0.5|.5|'')   DATA_SCALE='medium' ;;
-                *)                 DATA_SCALE='large'  ;;
-            esac
-        else
-            DATA_SCALE="$SCALE"
+        # Map this script's numeric --scale onto the generator's tier name.
+        #
+        # This used to be gated behind `gen_supports 'small,medium,large'`, a probe
+        # for a literal string that has never appeared in generate-data.py --help
+        # (it reads "small ~55k rows, medium ~2M, large ~10M"). The gate therefore
+        # never opened, the case map below was dead code, and every scale a reader
+        # would plausibly type was forwarded as a bare number -- which the generator
+        # snaps to the NEAREST of {small:1, medium:40, large:200}, break-even 20.5.
+        # So --scale 1 quietly produced the 54k-row small set instead of the ~2M
+        # medium set the docs promise, and `run-tests.sh --local --scale 1` then
+        # exited 2 complaining the data looked like scale 0.01. Removed the probe:
+        # generate-data.py has accepted tier names in every revision.
+        #
+        # Ordered numeric comparison, not glob arms. The old arms sent 0.2 to
+        # `large` while 0.5 and 1 got `medium`, so a smaller scale asked for more
+        # rows than a larger one. awk because bash cannot compare floats.
+        if   awk "BEGIN{exit !(${SCALE:-1} < 0.5)}"; then DATA_SCALE='small'
+        elif awk "BEGIN{exit !(${SCALE:-1} < 2)}";   then DATA_SCALE='medium'
+        else                                              DATA_SCALE='large'
         fi
         DATA_ARGS+=(--scale "$DATA_SCALE")
     fi

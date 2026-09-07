@@ -339,7 +339,7 @@ output scratchPostgresFqdn string = postgres.outputs.fullyQualifiedDomainName
 @description('PostgreSQL administrator login. This is PGUSER.')
 output postgresAdministratorLogin string = postgres.outputs.administratorLogin
 
-@description('Extension allowlist applied to azure.extensions, for scripts/check-pg-prereqs.sh to verify against.')
+@description('Extension allowlist applied to azure.extensions, for scripts/status.sh and scripts/install-pg-extensions.sh to verify against.')
 output postgresExtensionsAllowlist string = postgres.outputs.extensionsAllowlist
 
 @description('Endpoint of the Microsoft Foundry account. This is FOUNDRY_ENDPOINT.')

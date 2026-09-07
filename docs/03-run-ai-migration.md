@@ -109,7 +109,7 @@ semantically wrong, and nothing in the report distinguishes it from an object th
 Do not convert a schema with invalid objects:
 
 ```bash
-./scripts/connect.sh oracle-azure -f tests/diagnose-invalid.sql   # or --local
+./scripts/connect.sh oracle-azure -f tests/diagnose-invalid.sql   # or: oracle-local
 ```
 
 That recompiles first, then lists whatever is still invalid, separates the **two dangling synonyms
@@ -457,10 +457,11 @@ this, the run is over before it started and the UI will not tell you why:
 
 ![The migration project page with the Schema Migration button reading Extraction Failed, and a red banner beneath it containing the words Extraction Failed and nothing else.](images/screenshots/08-extraction-failed.png)
 
-<sub>The whole message. The reason lives in `artifacts/oracle/<SCHEMA>/extract/internal/logs/extraction.log`. Ours was connecting as `CONTOSO` instead of `O2P_READER` (§ 3.2) — `ORA-00942` on `V$RESOURCE_LIMIT`, pool never initialised, `0 extracted, 0 failed, 0 excluded`. Whatever the cause, note that the interface gives you two words and no link to that log.</sub>
+<sub>The whole message. The reason lives in `artifacts/oracle/<SCHEMA>/extract/internal/logs/extraction.log`. Ours was connecting as `CONTOSO` instead of `O2P_READER` (§ 3.2) — `ORA-00942` on `V$RESOURCE_LIMIT`, pool never initialised, `0 extracted, 0 failed, 0 excluded`. The dashboard's **View Logs** link on the Schema Migration card opens exactly that file — an earlier version of this page claimed it did not, which was wrong.</sub>
 
 Read that log before you change anything else. It is the single highest-value file in the project
-directory and nothing in the interface points at it.
+directory. Use **View Logs** on the Schema Migration card, which the dashboard renders for any
+extraction that is not `NotStarted`, and which Microsoft's Learn walkthrough also points at.
 
 What you should see happening, in order:
 
@@ -516,7 +517,7 @@ beside the project page:
 The report classifies every object. Read it in this order:
 
 **First: did validation actually run?** If the report has no `plpgsql_check` findings anywhere
-across 85 package bodies, that is not a clean schema, that is a skipped check. Go back to § 1.1.
+across 90 package bodies, that is not a clean schema, that is a skipped check. Go back to § 1.1.
 The most dangerous report this pipeline can produce is a flattering one.
 
 **Second: the counts.** Objects in, objects converted, objects flagged. Compare against
