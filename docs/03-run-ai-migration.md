@@ -479,6 +479,21 @@ beside the project page:
 
 <sub>The real numbers from this lab's run. The full reports are committed under [`docs/conversion-report/`](conversion-report/README.md) so you can compare yours against them.</sub>
 
+> **Collect the conversion directory before you tear the lab down.** Everything the run produced —
+> the reports, the converted DDL, `deploy.sql`, the per-chunk reports and
+> `internal/logs/conversion.log` — lives only in `~/.github/postgres-migrations/` on the machine
+> that ran the conversion. `scripts/destroy.sh` deletes that machine. The logs are the one artefact
+> you cannot reconstruct afterwards, and they are exactly what Microsoft will ask for if you report
+> anything:
+>
+> ```bash
+> ./scripts/collect-conversion-artifacts.sh   # writes out/conversion-artifacts-<stamp>.tar.gz
+> ./scripts/destroy.sh
+> ```
+>
+> This lab learned that the hard way: a completed run was destroyed with only three summary files
+> kept, and the logs behind its own published numbers no longer exist.
+
 The report classifies every object. Read it in this order:
 
 **First: did validation actually run?** If the report has no `plpgsql_check` findings anywhere

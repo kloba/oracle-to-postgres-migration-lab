@@ -205,6 +205,29 @@ if az group show --name "$RG" -o none 2>/dev/null; then
 fi
 
 # --------------------------------------------------------------------------
+# The conversion artefacts go with the VM
+#
+# The extension writes its reports, its converted DDL and -- the part you will
+# want and cannot rebuild -- internal/logs/conversion.log to
+# ~/.github/postgres-migrations/ on the Oracle VM. Deleting the resource group
+# deletes all of it.
+#
+# This is not hypothetical. A run on 2026-09-04 was torn down with only three
+# summary files preserved; when Microsoft asked for the conversion directory
+# days later, the logs and the per-object failure reasons no longer existed
+# anywhere. Nothing in this script warned about it, so nothing stopped it.
+#
+# Cheap to avoid: one tarball, seconds to collect.
+# --------------------------------------------------------------------------
+if [[ "$RES_COUNT" -gt 0 ]] && ! compgen -G "${REPO_ROOT}/out/conversion-artifacts-*.tar.gz" >/dev/null 2>&1; then
+    printf '    %s%sNo conversion artefacts have been collected from this deployment.%s\n' \
+        "$C_BOLD" "$C_YELLOW" "$C_RESET"
+    printf '    %sIf you ran a conversion, its logs and converted DDL live only on the Oracle VM\n' "$C_DIM"
+    printf '    and are about to be deleted with it. To keep them:%s\n\n' "$C_RESET"
+    printf '        %sscripts/collect-conversion-artifacts.sh%s\n\n' "$C_BOLD" "$C_RESET"
+fi
+
+# --------------------------------------------------------------------------
 # Confirm - type the resource group name
 # --------------------------------------------------------------------------
 if [[ "$ASSUME_YES" -eq 1 ]]; then
