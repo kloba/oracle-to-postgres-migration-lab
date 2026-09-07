@@ -108,10 +108,21 @@ text and translates it anyway, producing a converted object that is syntacticall
 semantically wrong, and nothing in the report distinguishes it from an object that was healthy.
 Do not convert a schema with invalid objects:
 
-```sql
-SELECT object_type, object_name FROM user_objects WHERE status = 'INVALID';
-EXEC UTL_RECOMP.RECOMP_SERIAL('CONTOSO');   -- then re-check
+```bash
+./scripts/connect.sh oracle-azure -f tests/diagnose-invalid.sql   # or --local
 ```
+
+That recompiles first, then lists whatever is still invalid, separates the **two dangling synonyms
+this schema creates on purpose** (hard case H-41) from real build errors, prints the compiler
+messages, and ends with a go / no-go line.
+
+A small non-zero count straight after a hand-run load is usually **not** a broken schema: a trigger
+created with `FOLLOWS`, or a body whose dependency was replaced later in the load, stays `INVALID`
+until something touches it. `scripts/seed-oracle.sh` runs `DBMS_UTILITY.COMPILE_SCHEMA` before it
+counts for exactly that reason, so a count that only appears when you load the SQL by hand is
+almost always transient. Whether a *dangling synonym* reports `INVALID` is also version-dependent —
+on `gvenzl/oracle-free:23-slim` both of ours report `VALID`, because Oracle does not mark a synonym
+until something references it.
 
 ---
 
