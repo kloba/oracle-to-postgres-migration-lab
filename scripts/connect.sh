@@ -55,6 +55,7 @@ TUNNEL_ONLY=0
 DIRECT=0
 PORT_OVERRIDE=''
 SQL_COMMAND=''
+SQL_FILE=''
 
 usage() {
     cat <<EOF
@@ -89,6 +90,9 @@ ${C_BOLD}OPTIONS${C_RESET}
     -c, --command <sql>
                      Run one statement non-interactively and exit. Useful in
                      scripts:  ${SCRIPT_NAME} oracle-local -c 'SELECT COUNT(*) FROM user_objects;'
+    -f, --file <path>
+                     Run a .sql file non-interactively and exit, e.g.
+                     ${SCRIPT_NAME} oracle-local -f tests/diagnose-invalid.sql
     -h, --help       Show this help and exit.
 
 ${C_BOLD}HOW THE AZURE TARGETS ARE REACHED${C_RESET}
@@ -126,10 +130,23 @@ while [[ $# -gt 0 ]]; do
         --port=*)             PORT_OVERRIDE="${1#*=}"; shift ;;
         -c|--command)         SQL_COMMAND="${2:-}"; [[ -n "$SQL_COMMAND" ]] || die "--command needs a value"; shift 2 ;;
         --command=*)          SQL_COMMAND="${1#*=}"; shift ;;
+        -f|--file)            SQL_FILE="${2:-}"; [[ -n "$SQL_FILE" ]] || die "--file needs a value"; shift 2 ;;
+        --file=*)             SQL_FILE="${1#*=}"; shift ;;
         -h|--help)            usage; exit 0 ;;
         *) printf '%sunknown target or option: %s%s\n\n' "$C_RED" "$1" "$C_RESET" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+# --file is sugar for --command with the file's contents. Resolving it here means
+# the three places that consume SQL_COMMAND -- two Oracle, one psql -- need no
+# changes and cannot drift apart. sqlplus reads it as a script on stdin, so
+# multi-statement files with PL/SQL blocks and / terminators work as written.
+if [[ -n "$SQL_FILE" ]]; then
+    [[ -z "$SQL_COMMAND" ]] || die "use --command or --file, not both"
+    [[ -f "$SQL_FILE" ]]    || die "no such file: ${SQL_FILE}"
+    SQL_COMMAND="$(cat "$SQL_FILE")"
+    [[ -n "$SQL_COMMAND" ]] || die "${SQL_FILE} is empty"
+fi
 
 if [[ -z "$TARGET" ]]; then
     printf '%serror: name a target%s\n\n' "$C_RED" "$C_RESET" >&2

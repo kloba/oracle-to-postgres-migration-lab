@@ -847,23 +847,84 @@ SYSDBA
     fi
 }
 
+# The reader account the documentation tells you to point the tool at.
+#
+# scripts/install-oracle.sh creates O2P_READER on the Azure VM at first boot.
+# Nothing created it on the LOCAL path, so `connect.sh oracle-local --reader`
+# failed with ORA-01017, prerequisite check 5 in docs/03-run-ai-migration.md
+# could not pass, and the obvious next move was to drive the conversion as
+# CONTOSO instead -- which is precisely how this lab lost a run to ORA-00942 on
+# V$RESOURCE_LIMIT. The docs named an account that half the paths never made.
+#
+# Same grants as install-oracle.sh, deliberately: SELECT_CATALOG_ROLE and SELECT
+# ANY DICTIONARY between them cover the V$ views the extractor needs, and
+# SYS.ARGUMENT$ is the one people miss -- without it packaged routine arguments
+# come back empty and the tool reports "no parameters" rather than an error.
+create_reader_account() {
+    local log="${RUN_LOG_DIR}/000-sysdba-reader-account.log" rc=0
+    if [[ -z "${READER_PW:-}" ]]; then
+        printf '  %-4s %-44s %10s  %sskip%s\n' '--' "create ${ORACLE_MIGRATION_USER} (reader account)" '-' "$C_YELLOW" "$C_RESET"
+        printf '       %sORACLE_MIGRATION_PASSWORD is not set; connect.sh --reader will not work%s\n' "$C_DIM" "$C_RESET"
+        return 0
+    fi
+    printf '  %-4s %-44s ' '--' "create ${ORACLE_MIGRATION_USER} (reader account)"
+    exec_sqlplus > "$log" 2>&1 <<SYSDBA || rc=$?
+CONNECT / AS SYSDBA
+ALTER SESSION SET CONTAINER = ${ORACLE_SERVICE};
+WHENEVER SQLERROR CONTINUE NONE
+CREATE USER ${ORACLE_MIGRATION_USER} IDENTIFIED BY "${READER_PW}";
+WHENEVER SQLERROR EXIT FAILURE
+ALTER USER ${ORACLE_MIGRATION_USER} IDENTIFIED BY "${READER_PW}" ACCOUNT UNLOCK;
+GRANT CONNECT               TO ${ORACLE_MIGRATION_USER};
+GRANT CREATE SESSION        TO ${ORACLE_MIGRATION_USER};
+GRANT SELECT_CATALOG_ROLE   TO ${ORACLE_MIGRATION_USER};
+GRANT SELECT ANY DICTIONARY TO ${ORACLE_MIGRATION_USER};
+GRANT SELECT ON sys.argument\$ TO ${ORACLE_MIGRATION_USER};
+EXIT SUCCESS
+SYSDBA
+    # ORA-01920 just means the account already exists, which is the normal state
+    # on a re-seed; everything after it still runs.
+    if [[ "$rc" -eq 0 ]] && ! grep -qE '^(ORA-|PLS-)[0-9]' "$log" 2>/dev/null; then
+        printf '%10s  %sok%s\n' '-' "$C_GREEN" "$C_RESET"
+    elif grep -q 'ORA-01920' "$log" 2>/dev/null; then
+        printf '%10s  %sok%s\n' '-' "$C_GREEN" "$C_RESET"
+        printf '       %salready existed; password and grants refreshed%s\n' "$C_DIM" "$C_RESET"
+    else
+        printf '%10s  %sFAIL%s\n' '-' "$C_RED" "$C_RESET"
+        printf '       %sconnect.sh --reader and the documented conversion account will not work%s\n' "$C_RED" "$C_RESET"
+        printf '       %ssee %s%s\n' "$C_DIM" "${log#"$REPO_ROOT"/}" "$C_RESET"
+        FAILED=$(( FAILED + 1 ))
+    fi
+}
+
 # SELECT on the V$ dynamic performance views, which SYS owns and which a stock
 # CONTOSO cannot read. Same SYSDBA-only story as DBMS_RLS above, and the same
 # placement: after 00-*, which drops and recreates the user.
 #
-# This one is NOT cosmetic, and it is not about a hard case. The VS Code
-# extension's extractor sizes its Oracle connection pool by asking
-# V$RESOURCE_LIMIT how many sessions are free, and it does that in
-# connection_pool.auto_detect_workers() BEFORE it enumerates a single object.
-# Without the grant that query raises
+# READ THIS BEFORE CITING IT AS A PRODUCT DEFECT.
+#
+# The extension's extractor sizes its Oracle connection pool by asking
+# V$RESOURCE_LIMIT how many sessions are free, in auto_detect_workers(), BEFORE
+# it enumerates a single object. Connect as CONTOSO -- the schema owner, which
+# holds no dictionary privileges -- and that query raises
 #
 #   ORA-00942: table or view "SYS"."V_$RESOURCE_LIMIT" does not exist
 #
 # the pool never initialises, and the run ends "Extraction Failed ... 0
 # extracted, 0 failed, 0 excluded" with nothing in the UI to say why. A real run
-# against this lab failed exactly that way; the grant fixed it and the same run
-# then extracted 1,299 objects. So a failure here is reported as a hard error --
-# it costs you the entire conversion, not one hard case.
+# against this lab failed exactly that way.
+#
+# An earlier version of this comment called that an undocumented prerequisite of
+# the tool. It is not, and the claim was repeated in the docs and sent to
+# Microsoft before anyone checked it. The lab's own reader account, O2P_READER,
+# is created by scripts/install-oracle.sh with SELECT_CATALOG_ROLE and SELECT ANY
+# DICTIONARY, and either of those covers the V$ views -- verified 2026-09-07 by
+# granting exactly those to a throwaway account and reading the view. The bug was
+# ours: we pointed the wizard at the schema owner.
+#
+# This grant stays because driving the tool as the schema owner is an easy and
+# reasonable thing to do, and silently failing at it costs a whole run. It is a
+# convenience, not a fix for a product gap.
 #
 # Note V_$RESOURCE_LIMIT, not V$RESOURCE_LIMIT: V$ names are public synonyms and
 # you cannot grant on a synonym. Note also that the view returns zero rows inside
@@ -889,8 +950,8 @@ SYSDBA
         printf '%10s  %sok%s\n' '-' "$C_GREEN" "$C_RESET"
     else
         printf '%10s  %sFAIL%s\n' '-' "$C_RED" "$C_RESET"
-        printf '       %sthe conversion tool will fail at pool init with ORA-00942 and%s\n' "$C_RED" "$C_RESET"
-        printf '       %sextract 0 objects; grant it by hand before running the wizard:%s\n' "$C_RED" "$C_RESET"
+        printf '       %sconnecting the tool as %s will fail at pool init with ORA-00942;%s\n' "$C_RED" "$CONTOSO_SCHEMA" "$C_RESET"
+        printf '       %suse %s instead, or grant it by hand:%s\n' "$C_RED" "${ORACLE_MIGRATION_USER:-O2P_READER}" "$C_RESET"
         # shellcheck disable=SC2016  # v_$resource_limit is Oracle syntax, not a shell
         # variable. The dollar sign belongs to the view name and must reach the reader
         # verbatim, so single quotes are correct here and SC2016 is a false positive.
@@ -991,7 +1052,7 @@ for F in ${FILES[@]+"${FILES[@]}"}; do
     if [[ -z "$HARD_ERR" ]]; then
         printf '%10s  %sok%s\n' "$(fmt_ms "$MS")" "$C_GREEN" "$C_RESET"
         # The grants 00-* cannot make for itself, made straight after it.
-        if runs_as_system "$F"; then grant_dbms_rls; grant_catalog_read; fi
+        if runs_as_system "$F"; then grant_dbms_rls; grant_catalog_read; create_reader_account; fi
     else
         printf '%10s  %sFAIL%s\n' "$(fmt_ms "$MS")" "$C_RED" "$C_RESET"
         printf '       %s%s%s\n' "$C_RED" "$HARD_ERR" "$C_RESET"

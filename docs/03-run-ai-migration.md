@@ -282,24 +282,32 @@ tables. `O2P_READER` holds exactly:
 
 Oracle's `sessions` parameter must be greater than 10; the extension opens parallel metadata reads.
 
-**And it must be able to read `V$RESOURCE_LIMIT`.** This one is not in Microsoft's prerequisite
-list and it is the difference between a conversion and a blank screen. Before the extractor
-enumerates a single object it sizes its connection pool by asking how many sessions are free, in
-`connection_pool.auto_detect_workers()`. Without the privilege that query raises
+**Connect as `O2P_READER`, not as `CONTOSO`. This is the one that cost us a run.**
+
+Before the extractor enumerates a single object it sizes its Oracle connection pool by asking
+`V$RESOURCE_LIMIT` how many sessions are free, in `connection_pool.auto_detect_workers()`. The
+schema owner has no dictionary privileges, so as `CONTOSO` that query raises
 
 ```text
 ORA-00942: table or view "SYS"."V_$RESOURCE_LIMIT" does not exist
 ```
 
 the pool never initialises, and the UI says only **Extraction Failed** — the run ends `0 extracted,
-0 failed, 0 excluded` and the reason is buried in
-`artifacts/oracle/<SCHEMA>/extract/internal/logs/extraction.log`. That is exactly how the first real
-run of this lab failed. `scripts/seed-oracle.sh` now makes the grant as `SYSDBA` straight after
-`00-user-tablespace.sql`; by hand it is:
+0 failed, 0 excluded` with the reason buried in
+`artifacts/oracle/<SCHEMA>/extract/internal/logs/extraction.log`.
+
+**`O2P_READER` is not affected**, because `SELECT_CATALOG_ROLE` and `SELECT ANY DICTIONARY` both
+cover the `V$` views. Verified directly: an account holding exactly the grants above reads
+`V$RESOURCE_LIMIT` without error. So this is a *use the documented account* problem, not a missing
+prerequisite — an earlier version of this page claimed otherwise and was wrong.
+
+If you do want to drive the tool as the schema owner, `scripts/seed-oracle.sh` grants `CONTOSO`
+`SELECT_CATALOG_ROLE` and the `V$` views as `SYSDBA` so that path works too. By hand:
 
 ```sql
 ALTER SESSION SET CONTAINER = FREEPDB1;
-GRANT SELECT ON sys.v_$resource_limit TO contoso;   -- v_$, not v$: you cannot grant on a synonym
+GRANT SELECT_CATALOG_ROLE TO contoso;
+GRANT SELECT ON sys.v_$resource_limit TO contoso;  -- v_$, not v$: no granting on a synonym
 ```
 
 The view returns **zero rows inside a PDB** — it is a CDB-level view. That is fine. The extractor
@@ -449,7 +457,7 @@ this, the run is over before it started and the UI will not tell you why:
 
 ![The migration project page with the Schema Migration button reading Extraction Failed, and a red banner beneath it containing the words Extraction Failed and nothing else.](images/screenshots/08-extraction-failed.png)
 
-<sub>The whole message. The reason lives in `artifacts/oracle/<SCHEMA>/extract/internal/logs/extraction.log`, and on this lab it was the missing `V$RESOURCE_LIMIT` grant from § 3.2 — `ORA-00942`, pool never initialised, `0 extracted, 0 failed, 0 excluded`.</sub>
+<sub>The whole message. The reason lives in `artifacts/oracle/<SCHEMA>/extract/internal/logs/extraction.log`. Ours was connecting as `CONTOSO` instead of `O2P_READER` (§ 3.2) — `ORA-00942` on `V$RESOURCE_LIMIT`, pool never initialised, `0 extracted, 0 failed, 0 excluded`. Whatever the cause, note that the interface gives you two words and no link to that log.</sub>
 
 Read that log before you change anything else. It is the single highest-value file in the project
 directory and nothing in the interface points at it.

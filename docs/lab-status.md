@@ -256,11 +256,21 @@ result is a lower bound on what the tool can do, not an upper one.**
    `CognitiveServices_LocalAuth_Modify` with a **`modify`** effect rewrites it to `true` on every
    write — including a direct `az resource update`, which reported success and changed nothing. The
    docs now lead with **Microsoft Entra Id**.
-4. **`CONTOSO` could not read `V$RESOURCE_LIMIT`, and that alone killed the conversion.** The
-   extractor sizes its Oracle connection pool from that view *before* enumerating anything, so
-   without the grant it raised `ORA-00942` and the run ended `0 extracted, 0 failed, 0 excluded`
-   behind a UI banner that said only *Extraction Failed*. `scripts/seed-oracle.sh` now makes the
-   grant as `SYSDBA`, and treats a failure as a hard error rather than a skip.
+4. **We connected the tool as the schema owner instead of the documented reader, and it killed the
+   run with a two-word error.** The extractor sizes its Oracle connection pool from
+   `V$RESOURCE_LIMIT` *before* enumerating anything. `CONTOSO` has no dictionary privileges, so that
+   raised `ORA-00942` and the run ended `0 extracted, 0 failed, 0 excluded` behind a banner reading
+   only *Extraction Failed*, with the reason in a log the interface does not link to.
+
+   **This entry originally called `V$RESOURCE_LIMIT` an undocumented prerequisite. That was wrong,
+   and the claim reached Microsoft before it was checked.** `O2P_READER` — which
+   `scripts/install-oracle.sh` already creates with `SELECT_CATALOG_ROLE` and `SELECT ANY
+   DICTIONARY` — reads the view without error; verified on 2026-09-07 against an account holding
+   exactly those grants. So the defect was ours: we used the wrong account. What remains a fair
+   criticism of the tool is the diagnostic, not the prerequisite — a privilege failure and any other
+   failure produce the same two words. `scripts/seed-oracle.sh` now also grants `CONTOSO`
+   `SELECT_CATALOG_ROLE` so the schema-owner path works, and §3.10 records the separate lab bug this
+   uncovered.
 
 **What this run does NOT establish.** Nobody has compared the report against the 43 per-case
 predictions in `docs/design.md` §9, so those remain predictions (§2.2). No data was migrated (§2.3).
@@ -423,6 +433,30 @@ never pass that test, which is what actually blocked the earlier attempt. The
 second claim, that the gate was an interactive Azure sign-in, was half right for
 the wrong reason: no sign-in is needed to pick the scratch database; one is needed
 for **Foundry**, and only because key auth is policy-disabled (§1.10, defect 3).
+
+### 3.10 The docs named a reader account half the lab never created — fixed (2026-09-07)
+
+`docs/design.md` §2 names **`O2P_READER`** as the account the conversion tool uses.
+`docs/00-prerequisites.md`, `docs/architecture.md` and `docs/03-run-ai-migration.md` all describe its
+privileges, and `scripts/connect.sh --reader` connects as it.
+
+Only `scripts/install-oracle.sh` ever created it, and that runs on the **Azure VM at first boot**.
+On the local Docker path the account did not exist at all, so:
+
+- `./scripts/connect.sh oracle-local --reader` failed with `ORA-01017`
+- prerequisite check 5 in `docs/03-run-ai-migration.md` **could not pass**
+- and the obvious next move was to point the conversion at `CONTOSO` instead
+
+That last one is how this lab lost a run to `ORA-00942` on `V$RESOURCE_LIMIT` (§1.10, defect 4), and
+then reported it to Microsoft as a missing prerequisite of *their* tool. It was a missing account in
+*ours*.
+
+**Fixed (2026-09-07):** `scripts/seed-oracle.sh` now creates the reader as `SYSDBA` straight after
+`00-user-tablespace.sql`, with the same grants `install-oracle.sh` uses, and skips with a visible
+warning when `ORACLE_MIGRATION_PASSWORD` is unset. `scripts/connect.sh` also gained `-f/--file`,
+which the docs had already started referencing. Verified against the live local container:
+`connect.sh oracle-local --reader` connects, and `SELECT COUNT(*) FROM v$resource_limit` returns
+without error as that account.
 
 ### 3.4 Unused `.env.example` variables — resolved
 

@@ -136,13 +136,23 @@ Extraction … complete in 0m 0s: 0 extracted, 0 failed, 0 excluded
 ```
 
 Before it enumerates a single object the extractor sizes its Oracle connection
-pool by asking `V$RESOURCE_LIMIT` how many sessions are free. `CONTOSO` could not
-read it, so the pool never initialised and the run ended having done nothing.
+pool by asking `V$RESOURCE_LIMIT` how many sessions are free. `CONTOSO` is the
+schema owner and has no dictionary privileges, so the pool never initialised and
+the run ended having done nothing.
 
-This is not in Microsoft's prerequisite list, and `src/oracle/00-user-tablespace.sql`
-did not grant it. One `SYSDBA` statement fixed it:
+**This page first called that an undocumented prerequisite. It was wrong.** The
+lab's own reader account, `O2P_READER`, holds `SELECT_CATALOG_ROLE` and `SELECT
+ANY DICTIONARY`, and either one covers the `V$` views — checked on 2026-09-07 by
+granting exactly those to a throwaway account and reading the view. We had simply
+pointed the wizard at the schema owner. The fair criticism is the *diagnostic*:
+whatever goes wrong here, you get the words "Extraction Failed" and no link to the
+log that explains it.
+
+One `SYSDBA` statement unblocked our run, and the seed now does it so the
+schema-owner path works too:
 
 ```sql
+GRANT SELECT_CATALOG_ROLE TO contoso;
 GRANT SELECT ON sys.v_$resource_limit TO contoso;   -- v_$, not v$: no granting on a synonym
 ```
 
