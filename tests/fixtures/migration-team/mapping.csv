@@ -1,0 +1,2 @@
+Source_Object_Type,Source_Object,Azure_PostgreSQL_Object_Type,Azure_PostgreSQL_Object,Status,Action_Required,Error_Message
+FUNCTION,CONTOSO.FN_DEMO_TOTAL,FUNCTION,contoso.fn_demo_total(numeric),Not-Converted,yes,Synthetic fixture requiring null and rounding validation
