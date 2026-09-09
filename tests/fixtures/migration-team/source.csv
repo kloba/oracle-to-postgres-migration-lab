@@ -1,0 +1,4 @@
+order_id,amount,comment
+1,120.00,__NULL__
+2,1.48,"Synthetic, Unicode café"
+3,-12.00,refund
