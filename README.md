@@ -56,6 +56,7 @@ what a human still has to do.
 - [What you will learn](#what-you-will-learn)
 - [What is in the schema](#what-is-in-the-schema)
 - [Quickstart](#quickstart)
+- [GitHub Copilot migration team](#github-copilot-migration-team)
 - [How long it takes](#how-long-it-takes)
 - [What it costs](#what-it-costs)
 - [Documentation](#documentation)
@@ -282,6 +283,37 @@ docker logs -f "$ORACLE_CONTAINER_NAME"   # wait for DATABASE IS READY TO USE!
 
 Full detail — choosing a scale, reset and re-seed, troubleshooting — is in
 [02 — Seed the Oracle source](docs/02-seed-oracle.md#1-before-you-start).
+
+---
+
+## GitHub Copilot migration team
+
+The repo now includes a **Copilot-native team** for the work around schema conversion:
+repairing flagged objects, independently reviewing those repairs, comparing data exports,
+and tracking the 43 hard cases. The Microsoft PostgreSQL extension remains the converter.
+No HVE Squad fork, separate model API key, or Claude runtime is required.
+
+Start with the [team guide](docs/06-copilot-migration-team.md). In VS Code, open this repo
+and select **o2p-coordinator** in Copilot Chat; the specialist agents live in `.github/agents/`.
+Import the existing report offline first:
+
+```bash
+python3 tools/migration-team.py init --state out/migration-team \
+  --report docs/conversion-report/object_mapping_summary.csv --max-workers 2
+python3 tools/migration-team.py report --state out/migration-team
+```
+
+The queue preserves one-to-many mappings and includes both failed conversions and converted
+objects needing review. **The historical report is not enough to repair SQL:** supply the
+original Oracle DDL and converted candidate from a saved conversion project. Missing files
+block validation; they do not get reconstructed and labelled as original evidence.
+
+Each repair is compiled in its own disposable PostgreSQL 16 container, checked with
+`plpgsql_check`, and tested with SQL assertions before an independent reviewer can accept it.
+The validator publishes no ports and mounts no host directories. Data comparison is read-only
+and works on explicit CSV exports; data movement, Azure validation and cutover remain separate,
+authorized steps. `reviewed` means the supplied local checks and review passed — **not** that
+Oracle equivalence, Azure deployment, or a higher overall migration success rate is proven.
 
 ---
 
