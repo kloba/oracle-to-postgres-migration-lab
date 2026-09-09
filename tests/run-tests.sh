@@ -216,7 +216,7 @@ while IFS= read -r f; do [[ -n "$f" ]] && BICEP_FILES+=("$f");      done < <(fin
 while IFS= read -r f; do [[ -n "$f" ]] && BICEPPARAM_FILES+=("$f"); done < <(find_repo_files -name '*.bicepparam')
 
 CHECKS=(bash-syntax shellcheck exec-bits bicep-build python-compile
-        generator-determinism cloud-init-sync diagram-sync markdown-links secret-scan)
+        generator-determinism cloud-init-sync diagram-sync migration-team markdown-links secret-scan)
 [[ -n "$TARGET" ]] && CHECKS+=(verify-schema verify-counts)
 
 if [[ "$LIST_ONLY" -eq 1 ]]; then
@@ -541,6 +541,20 @@ if selected diagram-sync; then
         fi
     fi
     unset DOT_COUNT MISSING SRC PNG
+fi
+
+# Copilot queue/evidence regressions are offline. SQL execution is a separate
+# opt-in smoke run against disposable PostgreSQL; mocks are not SQL evidence.
+if selected migration-team; then
+    T0="$(now_ms)"; LOG="${RUN_LOG_DIR}/migration-team.log"
+    if ! have python3; then
+        record migration-team SKIP "python3 not installed" "$(( $(now_ms) - T0 ))"
+    elif python3 -m unittest discover -s "${REPO_ROOT}/tests" -p 'test_migration*.py' -v > "$LOG" 2>&1; then
+        record migration-team PASS "queue, evidence gates and isolated-validator unit tests" "$(( $(now_ms) - T0 ))"
+    else
+        record migration-team FAIL "migration-team regressions failed" "$(( $(now_ms) - T0 ))"
+        show_log "$LOG" 60
+    fi
 fi
 
 if selected markdown-links; then
