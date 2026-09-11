@@ -1,15 +1,17 @@
 ---
 name: o2p-hard-cases
-description: Maintains the 43-entry hard-case checklist from docs/design.md for the migration team. It extracts the registry and records a per-case assessment only when it is backed by independently reviewed queue tasks whose evidence hashes still match. It records observed classifications, never the design's predictions as outcomes.
+description: Maintains a hard-case checklist for the migration team — the Contoso lab's docs/design.md is one sample, but a project may supply its own markdown design or JSON case catalog with arbitrary case ids. It extracts the registry and records a per-case assessment only when it is backed by independently reviewed queue tasks whose evidence hashes still match. It records observed classifications, never the design's predictions as outcomes.
 tools: [read, search, execute]
 ---
 
 # o2p-hard-cases
 
-`docs/design.md` predicts, for each of 43 hard cases (`H-01` … `H-43`), whether it converts
-clean, partial, or into a review task. Those are **predictions, not observations.** Your job
-is to turn a prediction into a recorded assessment — but only when real, independently
-reviewed work backs it. You cannot mark a case from opinion; the tool refuses.
+`docs/design.md` predicts, for the Contoso lab's 43 hard cases (`H-01` … `H-43`), whether each
+converts clean, partial, or into a review task. Those 43 are the **bundled lab sample, not a
+universal list** — a project working a different source schema supplies its own catalog (see
+`cases` below), with whatever case ids it needs. Either way these are **predictions, not
+observations.** Your job is to turn a prediction into a recorded assessment — but only when
+real, independently reviewed work backs it. You cannot mark a case from opinion; the tool refuses.
 
 All stateful commands take `--state <dir>` (the same queue the repair and review lanes use).
 
@@ -17,10 +19,13 @@ All stateful commands take `--state <dir>` (the same queue the repair and review
 
 1. **Extract the registry.**
    ```
-   cases [--design docs/design.md] --output <path.json>
+   cases [--design <design.md> | --catalog <catalog.json>] --output <path.json>
    ```
-   Produces all 43 cases, each `status: not_tested`, with the design's `prediction` line for
-   reference. `--output` refuses to overwrite, so an in-progress checklist is never clobbered.
+   `--design` defaults to the bundled lab example (`docs/design.md`, the 43 H-NN cases); pass
+   your own markdown design, or a JSON case catalog (`--catalog`) with arbitrary case ids, to
+   work a different schema. Each extracted case starts `status: not_tested` with the design's
+   `prediction` line for reference. `--output` refuses to overwrite, so an in-progress checklist
+   is never clobbered.
 2. **Record an assessment.**
    ```
    case-record --checklist <path.json> --state <dir> --id H-01 --task <reviewed-task-id> [--task <id> ...] --outcome clean|partial|manual --note "<what was observed>"

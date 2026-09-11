@@ -122,6 +122,36 @@ class PureHelperTests(unittest.TestCase):
         self.assertEqual(validator._combine_status(True, "pass", "block"), "blocked")
         self.assertEqual(validator._combine_status(True, "block", "fail"), "blocked")
 
+    def test_quote_ident_escapes_and_neutralises_injection(self):
+        self.assertEqual(validator._quote_ident("contoso"), '"contoso"')
+        self.assertEqual(validator._quote_ident("Mixed Case"), '"Mixed Case"')
+        # an injection attempt collapses into a single inert quoted identifier
+        self.assertEqual(validator._quote_ident('x"; DROP SCHEMA public; --'),
+                         '"x""; DROP SCHEMA public; --"')
+
+    def test_check_schema_names_accepts_arbitrary_and_rejects_reserved(self):
+        self.assertEqual(validator.check_schema_names(["Warehouse", "sales_2024", "naïve"]),
+                         ("Warehouse", "sales_2024", "naïve"))
+        for bad in ([], ["pg_temp"], ["PG_catalog"], ["information_schema"],
+                    ["Information_Schema"], ["oracle"], ["ORACLE"], ["a", "a"],
+                    [""], ["has\x00nul"], [123]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    validator.check_schema_names(bad)
+
+    def test_schema_setup_sql_quotes_and_only_grants_public(self):
+        sql = validator._schema_setup_sql(["public", "Warehouse", 'x"y'], "o2p_candidate")
+        self.assertIn("GRANT USAGE, CREATE ON SCHEMA public TO o2p_candidate;", sql)
+        self.assertIn('CREATE SCHEMA "Warehouse" AUTHORIZATION o2p_candidate;', sql)
+        self.assertIn('CREATE SCHEMA "x""y" AUTHORIZATION o2p_candidate;', sql)
+        self.assertNotIn("CREATE SCHEMA public", sql)  # public is granted, never created
+
+    def test_search_path_lists_schemas_then_public_oracle_once(self):
+        self.assertEqual(validator._search_path_clause(["Warehouse", "public"]),
+                         '"$user", "Warehouse", "public", oracle')
+        self.assertEqual(validator._search_path_clause(["contoso"]),
+                         '"$user", "contoso", public, oracle')
+
 
 # --------------------------------------------------------------------------- #
 # validate() driven through a fake docker/psql layer.
@@ -395,10 +425,30 @@ class ValidateTests(unittest.TestCase):
     def test_result_has_full_contract_keys(self):
         result = self._run(FakeDocker())
         for key in ("status", "candidate_sha256", "checks_sha256", "dependencies_sha256",
-                    "engine", "image", "checks", "log", "started_at"):
+                    "engine", "image", "checks", "log", "started_at",
+                    "target_engine", "target_schemas"):
             self.assertIn(key, result)
         self.assertEqual(result["image"], validator.DEFAULT_IMAGE)
+        self.assertEqual(result["target_engine"], "postgresql")
+        self.assertEqual(result["target_schemas"], ["public"])  # backwards-compatible default
         self.assertTrue(result["started_at"].endswith("+00:00"))
+
+    def test_configured_schemas_are_provisioned_and_reported(self):
+        fake = FakeDocker()
+        result = self._run(fake, schemas=("Warehouse", "analytics"))
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["target_schemas"], ["Warehouse", "analytics"])
+        admin = next(inp for cmd, inp in fake.calls if inp and "CREATE ROLE" in inp)
+        self.assertIn('CREATE SCHEMA "Warehouse" AUTHORIZATION', admin)
+        self.assertIn('CREATE SCHEMA "analytics" AUTHORIZATION', admin)
+        self.assertNotIn("contoso", admin)  # no schema is hardcoded anymore
+
+    def test_reserved_schema_config_blocks_before_any_container(self):
+        fake = FakeDocker()
+        result = self._run(fake, schemas=("pg_evil",))
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(fake.calls, [])  # rejected before touching docker
+        self.assertEqual(result["target_schemas"], ["pg_evil"])
 
 
 if __name__ == "__main__":

@@ -20,7 +20,9 @@ Two rules that are never negotiable:
 - **The generators stay deterministic and standard-library only.** See
   [`tools/requirements.txt`](tools/requirements.txt) for the reasoning. Cross-run diffs of the
   conversion report are the entire point of the lab; a dependency that changes its float
-  formatting between releases breaks that silently.
+  formatting between releases breaks that silently. The one exception is the *test runner*: the
+  regression suite uses `pytest` ([`tools/requirements-test.txt`](tools/requirements-test.txt)),
+  which nothing under `tools/` imports and which never ships — it only *runs* the tests.
 
 ---
 
@@ -37,6 +39,17 @@ tests/run-tests.sh
 This is what CI runs on every push. It needs nothing but the repo and a few CLI tools, and it
 takes about a minute. Any tool that is missing is reported as `SKIP` rather than failing, so
 the command is always safe to type.
+
+One check, `migration-team`, runs its regressions under `pytest` — the lab's single test-time
+dependency (see [`tools/requirements-test.txt`](tools/requirements-test.txt)). Install it once:
+
+```bash
+python3 -m pip install -r tools/requirements-test.txt
+```
+
+If `pytest` is absent the check `SKIP`s with that exact command, so a fresh clone still runs
+green; `--strict` (what CI uses) turns the skip into a failure, and CI installs the dependency
+so the suite genuinely runs.
 
 ### Against Oracle
 
@@ -81,7 +94,7 @@ run at all. Per-check logs land in `out/logs/tests-<timestamp>/`, which is gitig
 | `generator-determinism` | python3 | The generator produces byte-identical output across two runs with **different** `PYTHONHASHSEED` values. |
 | `cloud-init-sync` | python3 | `scripts/cloud-init/oracle-vm.yaml` still embeds a byte-identical copy of `scripts/install-oracle.sh`. Re-sync with `python3 tools/sync-cloud-init.py`. |
 | `diagram-sync` | — (graphviz optional) | Every `docs/images/*.dot` has a rendered `*.png` beside it, and — when Graphviz is installed — the PNG still matches its source. Re-render with `./docs/images/render.sh`. A **missing** PNG fails; a byte difference only warns, because Graphviz output is not stable across versions. |
-| `migration-team` | python3 | Offline regressions for report grouping, concurrent claims, ownership, retry limits, stale evidence, CSV comparison and validator failure handling. Mocked validator tests are not SQL-execution evidence; use the separate live smoke flow in [the team guide](docs/06-copilot-migration-team.md). |
+| `migration-team` | python3 + pytest | Offline regressions for report grouping, concurrent claims, ownership, retry limits, stale evidence, CSV comparison, validator failure handling and the whole-migration controller (`tests/test_migration_full_run.py`). Runs under `pytest` ([`tools/requirements-test.txt`](tools/requirements-test.txt)); a missing `pytest` `SKIP`s with the install command. Mocked validator tests are not SQL-execution evidence; use the separate live smoke flow in [the team guide](docs/06-copilot-migration-team.md). |
 | `markdown-links` | python3 | Every *relative* link **and image** in every `*.md` resolves to a file that exists. External URLs are never fetched — a test that needs the internet is a test that fails on a train. Generated reports under `docs/conversion-report/` are excluded: they are the conversion tool's own output and link to per-chunk files this repo does not ship. |
 | `secret-scan` | — | No GUID that is not the all-zero placeholder, and no `.env` tracked by git. |
 | `verify-schema` | `--local`/`--azure` | [`tests/verify-schema.sql`](tests/verify-schema.sql) — object budget, zero invalid objects, foreign keys validated, hard-case constructs present. |

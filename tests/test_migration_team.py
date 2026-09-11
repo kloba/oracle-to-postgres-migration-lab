@@ -36,9 +36,10 @@ class QueueTests(unittest.TestCase):
         self.report = self.root / 'mapping.csv'
         self.q = Queue(self.root / 'state')
 
-    def init(self, rows=None, max_workers=2):
+    def init(self, rows=None, max_workers=2, target_schemas=('contoso',)):
         csv_file(self.report, rows or [mapping()])
-        return self.q.initialize(self.report, max_workers=max_workers)
+        return self.q.initialize(self.report, max_workers=max_workers,
+                                 target_schemas=list(target_schemas) if target_schemas else None)
 
     def stage(self):
         self.init()
@@ -157,18 +158,25 @@ class QueueTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'passing scratch'):
             self.q.review(task_id, 'skeptic', 'accept', 'cannot approve failure')
 
-    def test_three_validation_attempts_then_explicit_block_and_unblock(self):
+    def test_three_validation_attempts_cannot_be_reset_by_unblock(self):
         task_id = self.stage()
         def failed(*a, **kw):
             return {'status': 'failed', 'checks': [], 'log': 'SQL error'}
         for _ in range(3):
             self.q.validate(task_id, 'repair-1', failed, 'test-double', 10)
-        with self.assertRaisesRegex(ValueError, 'three validation'):
+        with self.assertRaisesRegex(ValueError, 'validation budget exhausted'):
             self.q.validate(task_id, 'repair-1', failed, 'test-double', 10)
+        self.assertEqual(self.q.show(task_id)['validation_attempts'], 3)
         self.q.release(task_id, 'repair-1', 'Need missing dependency', blocked=True)
-        self.q.unblock(task_id, 'Dependency now supplied by coordinator')
-        task = self.q.claim('repair-2', task_id)
-        self.assertEqual(task['validation_attempts'], 0)
+        with self.assertRaisesRegex(ValueError, 'unblock does not reset attempts'):
+            self.q.unblock(task_id, 'Dependency now supplied by coordinator')
+        task = self.q.show(task_id)
+        self.assertEqual(task['status'], 'blocked')
+        self.assertEqual(task['validation_attempts'], 3)
+        self.assertEqual(task['validation_budget']['used'], 3)
+        self.assertFalse(task['validation_budget']['can_validate'])
+        with self.assertRaises(ValueError):
+            self.q.claim('repair-2', task_id)
 
     def test_crashed_validator_returns_task_to_owner(self):
         task_id = self.stage()
@@ -229,6 +237,237 @@ class QueueTests(unittest.TestCase):
                 self.assertIn('not a valid hard-case checklist', stderr.getvalue())
                 self.assertNotIn('Traceback', stderr.getvalue())
 
+    def test_validate_requires_explicit_schema_configuration(self):
+        # A queue created without a target schema must not guess one from the CSV.
+        q = Queue(self.root / 'noschema')
+        csv_file(self.report, [mapping()])
+        q.initialize(self.report)
+        task_id = q.claim('repair-1')['id']
+        with self.assertRaisesRegex(ValueError, 'no target schema configured'):
+            q.validate(task_id, 'repair-1', self.fake_valid, 'test-double', 10)
+        # configure migrates the schema in place; the queued/claimed task survives.
+        q.configure(target_schemas=['warehouse'])
+        self.assertEqual(q.show(task_id)['status'], 'claimed')
+
+    def test_reserved_and_unsupported_configuration_rejected_cleanly(self):
+        csv_file(self.report, [mapping()])
+        for i, bad in enumerate((['pg_temp'], ['information_schema'], ['oracle'], ['ORACLE'], [''])):
+            with self.subTest(schema=bad):
+                target = self.root / ('reserved-%d' % i)
+                with self.assertRaises(ValueError):
+                    Queue(target).initialize(self.report, target_schemas=bad)
+                self.assertFalse((target / 'queue.sqlite3').exists())  # never wrote a queue
+        with self.assertRaisesRegex(ValueError, 'unsupported migration pair'):
+            Queue(self.root / 'mysql').initialize(self.report, target_schemas=['s'], source_engine='mysql')
+
+    def test_configured_schemas_passed_to_validator_and_preserved_case(self):
+        q = Queue(self.root / 'multi')
+        csv_file(self.report, [mapping()])
+        q.initialize(self.report, target_schemas=['Warehouse', 'analytics_2024', 'naïve'])
+        task_id = q.claim('repair-1')['id']
+        paths = []
+        for name, text in [('source.sql', 'X'), ('candidate.sql', 'Y'),
+                           ('checks.sql', 'SELECT 1 AS check_name, true AS passed')]:
+            path = self.root / ('multi_' + name)
+            path.write_text(text)
+            paths.append(path)
+        q.stage(task_id, 'repair-1', *paths)
+        captured = {}
+        def capturing(candidate, checks, dependencies, **kw):
+            captured['schemas'] = kw.get('schemas')
+            return {'status': 'passed', 'candidate_sha256': digest(candidate),
+                    'checks_sha256': digest(checks), 'checks': [], 'log': ''}
+        q.validate(task_id, 'repair-1', capturing, 'img', 10)
+        self.assertEqual(tuple(captured['schemas']), ('Warehouse', 'analytics_2024', 'naïve'))
+
+    def test_reconfiguring_schema_invalidates_prior_review(self):
+        task_id = self.validated()  # passed + pending_review under the 'contoso' schema
+        self.q.configure(target_schemas=['warehouse'])  # never wipes the task
+        self.assertEqual(self.q.show(task_id)['status'], 'pending_review')
+        with self.assertRaisesRegex(ValueError, 'stale'):
+            self.q.review(task_id, 'skeptic', 'accept', 'accepting under changed config')
+
+    def reviewed(self, reviewer='skeptic-1'):
+        task_id = self.validated()
+        self.q.review(task_id, reviewer, 'accept', 'independent review of the repair')
+        return task_id
+
+    def test_reopen_requires_an_independent_actor_and_reason(self):
+        task_id = self.reviewed()
+        with self.assertRaisesRegex(ValueError, 'own accepted review'):
+            self.q.reopen(task_id, ' REPAIR-1 ', 'author cannot invalidate their own review')
+        with self.assertRaisesRegex(ValueError, 'concrete reason'):
+            self.q.reopen(task_id, 'auditor-2', '   ')
+        self.assertEqual(self.q.show(task_id)['status'], 'reviewed')  # refused attempts change nothing
+
+    def test_reopen_only_applies_to_reviewed_tasks(self):
+        task_id = self.validated()  # pending_review, never accepted
+        with self.assertRaisesRegex(ValueError, 'only reviewed'):
+            self.q.reopen(task_id, 'auditor-2', 'not reviewed yet')
+
+    def test_reopen_archives_prior_review_and_clears_acceptance(self):
+        task_id = self.reviewed()
+        workdir = self.q.workdir(task_id)
+        before = {name: digest(workdir / name)
+                  for name in ('source.sql', 'candidate.sql', 'checks.sql', 'validation.json')}
+        result = self.q.reopen(task_id, 'auditor-2', 'runtime counterexample refutes the review')
+        # acceptance cleared through the queue; retry budget retained, not replenished
+        self.assertEqual(result['status'], 'queued')
+        self.assertIsNone(result['reviewer'])
+        self.assertIsNone(result['evidence'])
+        self.assertIsNone(result['worker'])
+        self.assertEqual(result['validation_attempts'], 1)
+        # prior artifacts archived byte-for-byte with matching, recorded hashes
+        archive = Path(result['review_archive'])
+        self.assertTrue(archive.is_dir())
+        review = json.loads((archive / 'review.json').read_text())
+        self.assertEqual(review['task']['reviewer'], 'skeptic-1')
+        self.assertEqual(json.loads(review['task']['evidence'])['status'], 'passed')
+        for name, sha in before.items():
+            self.assertEqual(digest(archive / name), sha)           # archived copy is identical
+            self.assertEqual(review['captured_sha256'][name], sha)  # and its recorded hash matches
+            self.assertEqual(digest(workdir / name), sha)           # the original is left untouched
+
+    def test_reopened_task_needs_fresh_validation_before_rereview(self):
+        task_id = self.reviewed()
+        self.q.reopen(task_id, 'auditor-2', 'refuted by real Oracle/PostgreSQL counterexamples')
+        with self.assertRaisesRegex(ValueError, 'passing scratch'):
+            self.q.review(task_id, 'skeptic-2', 'accept', 'cannot re-accept without revalidating')
+        # the full repair cycle works again on the corrected version
+        self.q.claim('repair-2', task_id)
+        paths = [self.q.workdir(task_id) / n for n in ('source.sql', 'candidate.sql', 'checks.sql')]
+        self.q.stage(task_id, 'repair-2', *paths)
+        self.q.validate(task_id, 'repair-2', self.fake_valid, 'test-double', 10)
+        self.assertEqual(self.q.review(task_id, 'skeptic-2', 'accept', 'revalidated after fix')['status'],
+                         'reviewed')
+
+    def test_reopen_preserves_the_validation_budget(self):
+        task_id = self.reviewed()  # validated once -> attempts == 1
+        self.q.reopen(task_id, 'auditor-2', 'refuted')
+        self.assertEqual(self.q.show(task_id)['validation_attempts'], 1)  # not reset to 0
+        self.q.claim('repair-2', task_id)
+        paths = [self.q.workdir(task_id) / n for n in ('source.sql', 'candidate.sql', 'checks.sql')]
+        self.q.stage(task_id, 'repair-2', *paths)
+        result = self.q.validate(task_id, 'repair-2', self.fake_valid, 'test-double', 10)
+        self.assertEqual(result['validation_attempts'], 2)  # resumes the budget, does not restart it
+
+    def test_reopen_of_an_exhausted_budget_blocks_instead_of_queueing(self):
+        task_id = self.stage()
+        def failed(*a, **kw):
+            return {'status': 'failed', 'checks': [], 'log': 'SQL error'}
+        self.q.validate(task_id, 'repair-1', failed, 'test-double', 10)          # attempt 1
+        self.q.validate(task_id, 'repair-1', failed, 'test-double', 10)          # attempt 2
+        self.q.validate(task_id, 'repair-1', self.fake_valid, 'test-double', 10)  # attempt 3 passes
+        self.q.review(task_id, 'skeptic-1', 'accept', 'accepted on the third attempt')
+        result = self.q.reopen(task_id, 'auditor-2', 'refuted after the budget was spent')
+        self.assertEqual(result['status'], 'blocked')       # no retry budget left -> not re-queued
+        self.assertEqual(result['validation_attempts'], 3)  # retained, never replenished by a reopen
+        with self.assertRaisesRegex(ValueError, 'no queued tasks'):
+            self.q.claim('repair-9')                         # must be unblocked by a coordinator
+
+    def test_reopen_refuses_a_symlinked_history_directory(self):
+        task_id = self.reviewed()
+        (self.q.workdir(task_id) / 'history').symlink_to(self.root)
+        with self.assertRaisesRegex(ValueError, 'real directory'):
+            self.q.reopen(task_id, 'auditor-2', 'attempted reopen with a hijacked history path')
+
+    @staticmethod
+    def _failed(*a, **kw):
+        return {'status': 'failed', 'checks': [], 'log': 'SQL error'}
+
+    def _inject_legacy_history(self, task_id, counter, validate_events):
+        """Simulate a pre-instrumentation task: raw 'validate' events plus a
+        counter that was manually reset below the true lifetime usage."""
+        import sqlite3
+        con = sqlite3.connect(str(self.q.db))
+        with con:
+            for _ in range(validate_events):
+                con.execute("INSERT INTO events(task_id,action,actor,detail,created_at) "
+                            "VALUES(?,?,?,?,?)", (task_id, 'validate', 'legacy', 'passed',
+                                                  '2020-01-01T00:00:00+00:00'))
+            con.execute("UPDATE tasks SET validation_attempts=? WHERE id=?", (counter, task_id))
+        con.close()
+
+    def test_audit_and_show_expose_the_lifetime_budget(self):
+        task_id = self.validated()
+        self.assertEqual(self.q.show(task_id)['validation_budget']['used'], 1)
+        audit = self.q.audit(task_id)
+        self.assertEqual(audit['status'], 'passed')
+        self.assertEqual(audit['validation_budget']['used'], 1)
+        self.assertTrue(audit['validation_budget']['within_limit'])
+        self.assertTrue(any(e['action'] == 'validate-start' for e in audit['events']))
+
+    def test_audit_detects_a_reset_counter_from_event_history(self):
+        task_id = self.stage()
+        self._inject_legacy_history(task_id, counter=1, validate_events=4)
+        audit = self.q.audit(task_id)
+        self.assertEqual(audit['validation_budget']['used'], 4)   # from events, not the reset row counter
+        self.assertFalse(audit['validation_budget']['within_limit'])
+        self.assertFalse(audit['validation_budget']['review_eligible'])
+        self.assertIn('validation_limit_exceeded', audit['validation_budget']['issues'])
+        self.assertEqual(audit['status'], 'failed')
+
+    def test_validate_start_counts_attempts_and_unblock_retains_them(self):
+        task_id = self.stage()
+        self.q.validate(task_id, 'repair-1', self._failed, 'test-double', 10)  # used -> 1
+        self.assertEqual(self.q.show(task_id)['validation_budget']['used'], 1)
+        self.q.release(task_id, 'repair-1', 'need a dependency', blocked=True)
+        result = self.q.unblock(task_id, 'dependency supplied')
+        self.assertEqual(result['status'], 'queued')
+        self.assertEqual(result['validation_attempts'], 1)  # retained, NOT reset to 0
+
+    def test_unblock_refuses_once_the_budget_is_exhausted(self):
+        task_id = self.stage()
+        for _ in range(3):
+            self.q.validate(task_id, 'repair-1', self._failed, 'test-double', 10)
+        with self.assertRaisesRegex(ValueError, 'budget exhausted'):
+            self.q.validate(task_id, 'repair-1', self._failed, 'test-double', 10)  # 4th refused
+        self.q.release(task_id, 'repair-1', 'exhausted; needs a disposition', blocked=True)
+        with self.assertRaisesRegex(ValueError, 'does not reset'):
+            self.q.unblock(task_id, 'trying to reset the budget')
+
+    def test_review_reject_at_the_cap_blocks(self):
+        task_id = self.stage()
+        self.q.validate(task_id, 'repair-1', self._failed, 'test-double', 10)          # 1
+        self.q.validate(task_id, 'repair-1', self._failed, 'test-double', 10)          # 2
+        self.q.validate(task_id, 'repair-1', self.fake_valid, 'test-double', 10)        # 3 pass
+        result = self.q.review(task_id, 'skeptic-1', 'reject', 'reject at the cap')
+        self.assertEqual(result['status'], 'blocked')  # no budget left to re-queue
+
+    def test_quarantine_holds_against_unblock_and_claim(self):
+        task_id = self.reviewed()
+        result = self.q.reopen(task_id, 'auditor-2', 'authorization/lineage hold', quarantine=True)
+        self.assertEqual(result['status'], 'blocked')
+        self.assertTrue(result['validation_budget']['quarantined'])
+        with self.assertRaisesRegex(ValueError, 'quarantined'):
+            self.q.unblock(task_id, 'trying to release the hold')
+        with self.assertRaises(ValueError):
+            self.q.claim('repair-2', task_id)  # a blocked/quarantined task is not claimable
+        self.assertEqual(self.q.audit(task_id)['status'], 'failed')
+
+    def test_legacy_floor_counts_an_interrupted_attempt_across_a_reset(self):
+        # Reproduce the legacy undercount: one completed validate, an OLD-style
+        # unblock that reset the counter to 0, then an INTERRUPTED validate that
+        # bumped the counter to 1 but wrote no completion event. Lifetime used must
+        # be 2 (before-reset 1 + the post-reset counter 1), not the naive
+        # max(counter=1, validate_events=1)=1 the old global logic returned.
+        task_id = self.stage()
+        import sqlite3
+        con = sqlite3.connect(str(self.q.db))
+        with con:
+            con.execute("INSERT INTO events(task_id,action,actor,detail,created_at) "
+                        "VALUES(?,?,?,?,?)", (task_id, 'validate', 'repair-1', 'failed',
+                                              '2020-01-01T00:00:00+00:00'))
+            con.execute("INSERT INTO events(task_id,action,actor,detail,created_at) "
+                        "VALUES(?,?,?,?,?)", (task_id, 'unblock', 'coordinator', 'legacy reset',
+                                              '2020-01-01T00:00:01+00:00'))
+            con.execute("UPDATE tasks SET validation_attempts=1 WHERE id=?", (task_id,))
+        con.close()
+        budget = self.q.audit(task_id)['validation_budget']
+        self.assertEqual(budget['used'], 2)          # before(1) + max(counter=1, after=0)
+        self.assertGreater(budget['used'],
+                           max(1, sum(1 for _ in range(1))))  # strictly above the old max(1,1)=1
+
     def test_cli_reports_errors_nonzero(self):
         self.init()
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
@@ -280,6 +519,19 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual([c['id'] for c in cases], ['H-01', 'H-02'])
         self.assertTrue(all(c['status'] == 'not_tested' for c in cases))
         self.assertIn('partial', cases[0]['prediction'])
+
+    def test_hard_cases_accepts_a_user_supplied_json_catalog(self):
+        path = self.root / 'catalog.json'
+        path.write_text(json.dumps({'cases': [
+            {'id': 'PKG-1', 'title': 'Packages', 'prediction': 'partial'},
+            {'id': 'WH-2'}]}))
+        cases = hard_cases(path)['cases']
+        self.assertEqual([c['id'] for c in cases], ['PKG-1', 'WH-2'])
+        self.assertTrue(all(c['status'] == 'not_tested' for c in cases))
+        self.assertEqual(cases[0]['heading'], 'Packages')  # arbitrary ids, no H-NN assumed
+        path.write_text(json.dumps({'cases': [{'id': 'A'}, {'id': 'A'}]}))
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            hard_cases(path)
 
     def test_real_report_can_be_imported_without_sql(self):
         report = Path(__file__).resolve().parents[1] / 'docs/conversion-report/object_mapping_summary.csv'

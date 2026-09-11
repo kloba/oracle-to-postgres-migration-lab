@@ -26,6 +26,8 @@ def record_case(checklist, case_id, queue, task_ids, outcome, note):
         task = queue.show(task_id)
         if task['status'] != 'reviewed' or not task['evidence']:
             raise ValueError('case classifications require independently reviewed tasks')
+        if not task.get('validation_budget', {}).get('review_eligible', False):
+            raise ValueError('reviewed task has invalid or quarantined validation history: ' + task_id)
         if task['evidence']['input_sha256'] != queue.hashes(task_id):
             raise ValueError('reviewed task evidence is stale: ' + task_id)
         evidence.append({'task_id': task_id, 'reviewer': task['reviewer'],

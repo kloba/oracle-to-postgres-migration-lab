@@ -101,6 +101,15 @@ BASTION="$(jq -r '.bastionName // empty' "$OUTPUTS")"
 VM_ID="$(jq -r '.oracleVmId // empty' "$OUTPUTS")"
 [[ -n "$RG" && -n "$BASTION" && -n "$VM_ID" ]] || die "outputs.json is missing resourceGroupName, bastionName or oracleVmId"
 
+# Pin the Bastion call to the subscription the lab was deployed into. The active
+# `az account` default is global state that drifts (an `az login` in another
+# window, a teammate's `az account set`) and would send Bastion hunting for the
+# VM in the wrong subscription. oracleVmId already names the right one - every
+# full resource id begins /subscriptions/<guid>/ - so we never touch the default.
+SUBSCRIPTION="${VM_ID#/subscriptions/}"; SUBSCRIPTION="${SUBSCRIPTION%%/*}"
+[[ "$SUBSCRIPTION" != "$VM_ID" && -n "$SUBSCRIPTION" ]] || die "oracleVmId in outputs.json is not a full /subscriptions/... resource id"
+SUB_ARGS=(--subscription "$SUBSCRIPTION")
+
 SSH_KEY="${REPO_ROOT}/generated/ssh/o2p-lab_ed25519"
 [[ -f "$SSH_KEY" ]] || die "no SSH key at ${SSH_KEY#"$REPO_ROOT"/}"
 ADMIN="$(jq -r '.oracleAdminUsername // "azureuser"' "$OUTPUTS")"
@@ -118,7 +127,8 @@ if lsof -nP -iTCP:"$LOCAL_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     ok "something is already listening on ${LOCAL_PORT}; reusing it"
 else
     set -m
-    az network bastion tunnel --name "$BASTION" --resource-group "$RG" \
+    az network bastion tunnel ${SUB_ARGS[@]+"${SUB_ARGS[@]}"} \
+        --name "$BASTION" --resource-group "$RG" \
         --target-resource-id "$VM_ID" --resource-port 22 --port "$LOCAL_PORT" \
         </dev/null >/dev/null 2>&1 &
     TUNNEL_PID=$!

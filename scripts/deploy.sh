@@ -571,7 +571,21 @@ fi
 hdr "Connection details"
 mkdir -p "$GEN_DIR"
 
-RAW_OUT="$("${SHOW[@]}" --query properties.outputs -o json 2>/dev/null || echo '{}')"
+RAW_OUT="$("${SHOW[@]}" --query properties.outputs -o json 2>/dev/null || true)"
+
+# A failed or empty read must NOT clobber a good outputs.json with "{}". The old
+# fall-back to an empty object did exactly that: one transient `az deployment ...
+# show` error overwrote the record of a real deployment with an empty document,
+# and every downstream reader (connect.sh, status.sh, and destroy.sh's
+# subscription pin) then saw nothing. Treat empty/{}/null as a hard error and
+# leave any existing file untouched rather than poisoning known-good outputs.
+RAW_OUT_TRIMMED="${RAW_OUT//[$' \t\r\n']/}"
+case "$RAW_OUT_TRIMMED" in
+    ''|'{}'|'null')
+        die "the deployment finished but its outputs could not be read" \
+            "re-run 'az deployment ... show --query properties.outputs -o json' and check for a transient error;
+       not overwriting ${OUTPUTS_JSON#"$REPO_ROOT"/} with an empty document." ;;
+esac
 
 # Flatten {"k":{"type":..,"value":..}} to {"k":value} and drop anything whose
 # name smells like a credential. generated/ is gitignored, but a public repo
@@ -606,14 +620,32 @@ printf '  %-30s %s\n' "sshPrivateKey" "${SSH_KEY#"$REPO_ROOT"/}"
 # checked it. A reader inspecting azure.extensions would see all four
 # extensions present and conclude they were fine.
 # --------------------------------------------------------------------------
-PG_SERVER="$(out postgresServerName 2>/dev/null || true)"
-if [[ -n "$PG_SERVER" ]]; then
-    hdr "Applying the static-parameter restart"
-    PENDING="$(az postgres flexible-server parameter show \
-                 --resource-group "$RG" --server-name "$PG_SERVER" \
-                 --name shared_preload_libraries \
-                 --query isConfigPendingRestart -o tsv 2>/dev/null || true)"
-    if [[ "$PENDING" == "true" || "$PENDING" == "True" ]]; then
+# This block and the extension step below read the flat outputs.json this run
+# just wrote (connect.sh and seed-oracle.sh read it the same way). An earlier
+# revision called a helper named `out` that exists only in those two scripts,
+# never here; under `set -euo pipefail` the "out: command not found" was
+# swallowed by `2>/dev/null || true`, PG_SERVER came back empty, and BOTH steps
+# silently skipped -- the restart the converter depends on never ran, yet the
+# deploy still printed "succeeded". Read the value here instead, and fail loudly
+# when it is missing rather than skipping in silence.
+# --- deploy.sh:postdeploy BEGIN (test anchor) ---
+# outval <key> - one value from the flat outputs.json, empty string if absent.
+outval() { jq -r --arg k "$1" '.[$k] // empty' "$OUTPUTS_JSON" 2>/dev/null || true; }
+
+PG_SERVER="$(outval postgresServerName)"
+[[ -n "$PG_SERVER" ]] || die \
+    "deployment succeeded but ${OUTPUTS_JSON#"$REPO_ROOT"/} has no postgresServerName output" \
+    "the template exposed no PostgreSQL server name, so the plpgsql_check restart and the
+       extension step below cannot run, and connect.sh/status.sh/seed-oracle.sh will fail too.
+       Have the infra author add postgresServerName to the template outputs, then re-run."
+
+hdr "Applying the static-parameter restart"
+PENDING="$(az postgres flexible-server parameter show \
+             --resource-group "$RG" --server-name "$PG_SERVER" \
+             --name shared_preload_libraries \
+             --query isConfigPendingRestart -o tsv 2>/dev/null || true)"
+case "$PENDING" in
+    true|True)
         info "shared_preload_libraries is pending a restart; restarting ${PG_SERVER}"
         note "without this plpgsql_check is configured but not loaded, and it fails OPEN"
         if az postgres flexible-server restart --resource-group "$RG" \
@@ -623,10 +655,19 @@ if [[ -n "$PG_SERVER" ]]; then
             warn "restart failed - run it yourself before the first conversion:"
             note "az postgres flexible-server restart -g ${RG} -n ${PG_SERVER}"
         fi
-    elif [[ -n "$PENDING" ]]; then
+        ;;
+    false|False)
         ok "no restart pending; shared_preload_libraries is already in effect"
-    fi
-fi
+        ;;
+    *)
+        # az could not answer. This is exactly the case that used to pass
+        # unnoticed; surface it so nobody assumes plpgsql_check is loaded.
+        warn "could not read isConfigPendingRestart for ${PG_SERVER} (az returned '${PENDING:-<empty>}')"
+        note "the server may still need a restart before plpgsql_check loads; do not assume it is fine."
+        note "verify with scripts/install-pg-extensions.sh; if plpgsql_check is not loaded, run:"
+        note "az postgres flexible-server restart -g ${RG} -n ${PG_SERVER}"
+        ;;
+esac
 
 # --------------------------------------------------------------------------
 # Create the extensions
@@ -640,15 +681,85 @@ fi
 # From a laptop it is expected to fail, and it is reported as a step to do
 # later rather than as a deployment failure.
 # --------------------------------------------------------------------------
-if [[ -n "$PG_SERVER" ]] && command -v psql >/dev/null 2>&1; then
+if command -v psql >/dev/null 2>&1 && command -v pg_isready >/dev/null 2>&1; then
     hdr "Creating the extensions"
-    if "${SCRIPT_DIR}/install-pg-extensions.sh" >/dev/null 2>&1; then
-        ok "extensions created in both databases; plpgsql_check confirmed loaded"
+    # Point the installer at the server THIS run created, not whatever host is
+    # sitting in .env from a previous lab or the example file. install-pg-
+    # extensions.sh lets the environment win over .env (its OVERRIDE_ dance),
+    # and reads exactly these names. The password never went into outputs.json,
+    # so pass the one we just deployed with. Exported inside a subshell, never
+    # on a command line: no secret lands anywhere `ps` can read it.
+    PG_FQDN="$(outval postgresFqdn)"
+    PG_LOGIN="$(outval postgresAdministratorLogin)"
+    PG_DB="$(outval postgresDatabaseName)"
+    PG_SCRATCH_DB="$(outval postgresScratchDatabaseName)"
+    EXT_LOG="${TMP_DIR}/install-pg-extensions.log"
+    if [[ -z "$PG_FQDN" ]]; then
+        # Without the FQDN of the server THIS run created we cannot point the
+        # installer safely: with PGHOST unset it would fall back to whatever
+        # stale host sits in .env from a previous lab and "succeed" against the
+        # wrong server. Refuse to run it; report the step as UNVERIFIED.
+        warn "no postgresFqdn output; not running install-pg-extensions.sh against a guessed host"
+        note "the extension step is UNVERIFIED. Add postgresFqdn to the template outputs, then run"
+        note "scripts/install-pg-extensions.sh from the jumpbox, or over a tunnel."
     else
-        info "could not reach ${PG_SERVER} from here - private access, as designed"
-        note "run scripts/install-pg-extensions.sh from the jumpbox, or over a tunnel"
+        # Branch on install-pg-extensions.sh's EXIT CODE, not on English log text:
+        #   0  extensions created and plpgsql_check confirmed loaded
+        #   3  the server did not respond (pg_isready no-response) - VNet-private
+        #      from here, the expected laptop case; a step to do later
+        #   *  the server ANSWERED but a step failed (auth, a missing database, a
+        #      permission problem, an extension, or plpgsql_check not loaded)
+        ext_rc=0
+        (
+            # Pin the connection to the server THIS run created and neutralise
+            # every channel that could redirect it elsewhere. Exporting PGHOST
+            # sets the name, but libpq also honours PGHOSTADDR (a raw IP that
+            # overrides PGHOST's DNS) and PGSERVICE/PGSERVICEFILE (which can name
+            # an entirely different host/port/user/password from a service file).
+            # A stale value in any of them -- inherited from this shell or later
+            # restored when install-pg-extensions.sh sources .env -- would send
+            # pg_isready and psql, carrying the freshly deployed admin password,
+            # to the WRONG server. O2P_PIN_TARGET tells the installer to clear
+            # them again after it reads .env; we also drop the ambient ones here.
+            export O2P_PIN_TARGET=1
+            unset PGHOSTADDR PGSERVICE PGSERVICEFILE
+            export PGHOST="$PG_FQDN"
+            export PGPORT=5432                      # Azure Flexible Server's port
+            [[ -n "$PG_LOGIN" ]]      && export PGUSER="$PG_LOGIN"
+            [[ -n "$PG_DB" ]]         && export PGDATABASE="$PG_DB"
+            [[ -n "$PG_SCRATCH_DB" ]] && export SCRATCH_PGDATABASE="$PG_SCRATCH_DB"
+            export PGPASSWORD="${PG_PW:-$CONTOSO_PW}"
+            exec "${SCRIPT_DIR}/install-pg-extensions.sh"
+        ) >"$EXT_LOG" 2>&1 || ext_rc=$?
+        if [[ "$ext_rc" -eq 0 ]]; then
+            ok "extensions created in both databases; plpgsql_check confirmed loaded"
+        elif [[ "$ext_rc" -eq 3 ]]; then
+            # The server was unreachable from here. Expected when you deploy from
+            # a laptop: the flexible server is VNet-private. A step to do later --
+            # explicitly UNVERIFIED, never reported as done -- not a deploy failure.
+            info "could not reach ${PG_SERVER} from here - private access, as designed"
+            note "the extension step is UNVERIFIED; run scripts/install-pg-extensions.sh from the jumpbox, or over a tunnel"
+        else
+            # The server ANSWERED but a step failed. This is a real, non-network
+            # failure. Do not mislabel it as network, and do not let the deploy
+            # claim success while plpgsql_check may be unloaded (it fails OPEN, so
+            # the converter would silently skip its deep validation).
+            warn "install-pg-extensions.sh reached ${PG_SERVER} but did not finish clean (exit ${ext_rc}):"
+            tail -n 15 "$EXT_LOG" | sed 's/^/           /' >&2 || true
+            die "the target PostgreSQL was reached but the extension / plpgsql_check step failed" \
+                "the infrastructure is up, but conversions are NOT safe yet: plpgsql_check may be
+       configured but not loaded. Fix the failure shown above, then re-run
+       scripts/install-pg-extensions.sh (or re-run this deploy). Not printing success
+       while a postcondition is unverified."
+        fi
     fi
+else
+    hdr "Creating the extensions"
+    warn "psql / pg_isready not on PATH; not running install-pg-extensions.sh"
+    note "the extension step is UNVERIFIED. Install the PostgreSQL client, then run"
+    note "scripts/install-pg-extensions.sh from the jumpbox, or over a tunnel."
 fi
+# --- deploy.sh:postdeploy END (test anchor) ---
 
 printf '\n%s%sDeployment succeeded.%s Written to %s\n' "$C_BOLD" "$C_GREEN" "$C_RESET" "${OUTPUTS_JSON#"$REPO_ROOT"/}"
 cat <<EOF

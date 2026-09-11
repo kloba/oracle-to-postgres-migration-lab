@@ -216,7 +216,7 @@ while IFS= read -r f; do [[ -n "$f" ]] && BICEP_FILES+=("$f");      done < <(fin
 while IFS= read -r f; do [[ -n "$f" ]] && BICEPPARAM_FILES+=("$f"); done < <(find_repo_files -name '*.bicepparam')
 
 CHECKS=(bash-syntax shellcheck exec-bits bicep-build python-compile
-        generator-determinism cloud-init-sync diagram-sync migration-team markdown-links secret-scan)
+        generator-determinism cloud-init-sync diagram-sync migration-team deploy-postconditions lab-subscription markdown-links secret-scan)
 [[ -n "$TARGET" ]] && CHECKS+=(verify-schema verify-counts)
 
 if [[ "$LIST_ONLY" -eq 1 ]]; then
@@ -545,17 +545,57 @@ fi
 
 # Copilot queue/evidence regressions are offline. SQL execution is a separate
 # opt-in smoke run against disposable PostgreSQL; mocks are not SQL evidence.
+#
+# These run under pytest, not `unittest discover`. Four of the five
+# tests/test_migration_*.py files are unittest.TestCase suites, which pytest
+# collects and runs natively; the fifth, tests/test_migration_full_run.py, holds
+# the whole-migration controller regressions and is written with pytest fixtures
+# (tmp_path, monkeypatch, capsys) and bare test functions. unittest.discover
+# cannot run those: with pytest absent it fails importing the module, and with
+# pytest present it collects NONE of the functions yet still exits 0 -- reporting
+# success while asserting nothing, the exact fail-open shape this lab warns
+# about. pytest is the one test-only dependency this repo takes; it is declared
+# in tools/requirements-test.txt and is NOT a generator/runtime dependency --
+# tools/requirements.txt still holds, the generators stay standard-library only
+# and byte-deterministic.
+#
+# A missing pytest is a SKIP carrying the exact install command, so a fresh
+# clone stays "safe to type"; under --strict (which CI uses) that skip is fatal,
+# and CI installs tools/requirements-test.txt so the suite actually runs. That
+# is what keeps a missing runner from silently dropping core regression coverage.
 if selected migration-team; then
     T0="$(now_ms)"; LOG="${RUN_LOG_DIR}/migration-team.log"
+    MIG_FILES=( "${REPO_ROOT}"/tests/test_migration*.py )
     if ! have python3; then
         record migration-team SKIP "python3 not installed" "$(( $(now_ms) - T0 ))"
-    elif python3 -m unittest discover -s "${REPO_ROOT}/tests" -p 'test_migration*.py' -v > "$LOG" 2>&1; then
-        record migration-team PASS "queue, evidence gates and isolated-validator unit tests" "$(( $(now_ms) - T0 ))"
+    elif ! python3 -c 'import pytest' >/dev/null 2>&1; then
+        record migration-team SKIP "pytest missing - pip install -r tools/requirements-test.txt" "$(( $(now_ms) - T0 ))"
+    elif PYTHONPATH="${REPO_ROOT}/tools" python3 -m pytest -p no:cacheprovider -o addopts= -q \
+            "${MIG_FILES[@]}" > "$LOG" 2>&1; then
+        record migration-team PASS "queue, evidence, validator and whole-migration controller regressions" "$(( $(now_ms) - T0 ))"
     else
         record migration-team FAIL "migration-team regressions failed" "$(( $(now_ms) - T0 ))"
         show_log "$LOG" 60
     fi
+    unset MIG_FILES
 fi
+
+# These run the real shell paths against fake Azure commands in temporary
+# directories. They never deploy/delete resources or use the developer's .env.
+for REGRESSION_CHECK in deploy-postconditions lab-subscription; do
+    selected "$REGRESSION_CHECK" || continue
+    T0="$(now_ms)"; LOG="${RUN_LOG_DIR}/${REGRESSION_CHECK}.log"
+    REGRESSION_PATTERN="test_${REGRESSION_CHECK//-/_}.py"
+    if ! have python3; then
+        record "$REGRESSION_CHECK" SKIP "python3 not installed" "$(( $(now_ms) - T0 ))"
+    elif python3 -m unittest discover -s "${REPO_ROOT}/tests" -p "$REGRESSION_PATTERN" -v > "$LOG" 2>&1; then
+        record "$REGRESSION_CHECK" PASS "offline deployment/subscription regression checks" "$(( $(now_ms) - T0 ))"
+    else
+        record "$REGRESSION_CHECK" FAIL "infrastructure regression failed" "$(( $(now_ms) - T0 ))"
+        show_log "$LOG" 60
+    fi
+done
+unset REGRESSION_CHECK REGRESSION_PATTERN
 
 if selected markdown-links; then
     T0="$(now_ms)"; LOG="${RUN_LOG_DIR}/markdown-links.log"

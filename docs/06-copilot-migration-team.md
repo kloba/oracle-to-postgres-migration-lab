@@ -7,6 +7,11 @@ through `tools/migration-team.py`, which records file hashes and events as a **t
 log — accountability, not a security boundary — and validation runs against a real PostgreSQL
 16 server in a disposable container, not against a model's opinion of itself.
 
+The team is **schema-agnostic**: it validates against whatever target schema(s) a project
+configures, for the Oracle→PostgreSQL engine pair. Contoso Store is the bundled worked example,
+not a built-in assumption — nothing here hardcodes a `contoso` schema or a Contoso database
+name, and an unsupported engine pair is rejected rather than silently "translated".
+
 This is the automatable companion to [05 — Validate](05-validate.md). Where 05 is the manual
 differential method, this page is the scaffolding that lets several agents (or one agent and a
 human) grind through review objects without ever letting the author of a change be the one who
@@ -53,11 +58,11 @@ CLI cannot, and the CLI enforces the rest.
 
 | Agent | Role | CLI commands it drives | Tools |
 | --- | --- | --- | --- |
-| `o2p-coordinator` | Routes work, tracks state, reports. Works one bounded batch (≤2 lanes) at a time; delegates; never approves. | `init`, `list`, `show`, `report`, `unblock` | read, search, execute, agent |
+| `o2p-coordinator` | Routes work, tracks state, reports. Works one bounded batch (≤2 lanes) at a time; delegates; never approves. | `init`, `configure`, `list`, `show`, `report`, `unblock` | read, search, execute, agent |
 | `o2p-repair` | Repairs one object: stages original DDL + candidate + checks, validates in the container. | `claim`, `stage`, `validate`, `release` | read, search, edit, execute |
 | `o2p-reviewer` | Independent review; no `edit` tool. The queue blocks self-approval (`reviewer != worker`); it must not modify SQL. | `show`, `review` | read, search, execute |
 | `o2p-data` | Plans consistent exports (e.g. `ora2pg`) and diffs them offline. Does not move data. | `compare-data` | read, search, edit, execute |
-| `o2p-hard-cases` | Maintains the 43-case checklist; records an assessment only from reviewed tasks. | `cases`, `case-record` | read, search, execute |
+| `o2p-hard-cases` | Maintains a hard-case checklist (the lab's design or a project's own catalog); records an assessment only from reviewed tasks. | `cases`, `case-record` | read, search, execute |
 
 The tool lists use GitHub Copilot's documented tool aliases (`read`, `edit`, `search`,
 `execute`, and `agent` for delegation) — no invented tool names. Withholding the `edit` alias
@@ -82,9 +87,10 @@ percentage.
 | `claimed` | `stage` | `claimed` (SQL attached) |
 | `claimed` | `validate` (max 3 per task) | `validating` → `pending_review` (passed) / `claimed` (failed or blocked) |
 | `claimed` | `release --blocked` | `blocked` |
-| `blocked` | `unblock` | `queued` (resets the validation budget) |
+| `blocked` | `unblock` (unused budget, no quarantine) | `queued` (budget retained) |
 | `pending_review` | `review --decision accept` | `reviewed` |
-| `pending_review` | `review --decision reject` | `queued` |
+| `pending_review` | `review --decision reject` | `queued` / `blocked` (budget exhausted) |
+| `reviewed` | `reopen` with a concrete new regression | `queued` / `blocked` (existing budget exhausted) |
 
 What the CLI enforces on every call, so no running agent can talk it out of them (the state
 directory itself is tamper-evident, not tamper-proof — see [Honest limits](#honest-limits)):
@@ -97,15 +103,42 @@ directory itself is tamper-evident, not tamper-proof — see [Honest limits](#ho
   `candidate.sql`, and `checks.sql`; a missing file errors with *"the historical CSV alone is
   not enough to validate a repair."* You attach the **original** Oracle DDL — you do not
   reconstruct it from the mapping CSV.
+- **A configured target schema.** `validate` refuses until the queue has an explicit target
+  schema (set with `init --target-schema <name>` or `configure --target-schema <name>`, repeat
+  for several) — it never guesses one from the CSV, and rejects PostgreSQL system or
+  extension-owned namespaces (the `pg_` prefix, `information_schema`, `oracle`). The schema and
+  engine configuration is folded into each validation's evidence, so reconfiguring it makes
+  prior reviews stale and they must re-validate. A legacy queue created before this existed
+  gets that same actionable error — never a traceback — and `configure` migrates it in place
+  without touching its tasks.
 - **No self-approval.** `review` rejects a `--reviewer` whose name equals the task's `worker`.
 - **No stale acceptance.** Every staged file's SHA-256 is stored with the evidence; if the SQL
   changed after validation, `review --decision accept` refuses and you must re-validate.
-- **A three-attempt validation budget.** Each task allows three `validate` runs (the counter
-  increments on every attempt, pass or fail). The fourth is refused — *"three validation
-  attempts used; release --blocked with the remaining issue before a coordinator unblocks it"*.
-  The repair lane must then `release --blocked`; only a coordinator `unblock` **with a genuine
-  reason** resets the counter to zero. Unblocking clears a real blocker; it is not a lever to
-  grant more attempts.
+- **Accepted reviews can be refuted by new evidence.** `reopen --state <dir> --id <task>
+  --actor <independent-actor> --reason "<concrete regression>"` archives the prior recorded
+  task/review and current files under its `history/`, then clears acceptance. The actor must
+  differ from the repair author. Validation-attempt counts are retained, never reset: the
+  task becomes `queued` if attempts remain, otherwise `blocked`. Corrected SQL requires fresh
+  validation and independent review; an old `reviewed` label cannot hide a later failure.
+- **A lifetime three-attempt validation budget.** `audit --state <dir> --id <task>` exposes
+  recorded history and `validation_budget`; `show` includes the same budget summary. New
+  start events count interrupted attempts, and a baseline retains completed legacy attempts
+  even if an old counter was reset. `unblock` never replenishes the budget and refuses when
+  it is exhausted. Renaming a helper or creating another queue is not authorization for
+  additional attempts on the same lineage; cross-queue provenance must be audited separately.
+- **Quarantined reviews cannot be reused.** `reopen --quarantine` archives the prior record
+  and current files, clears acceptance and holds the task blocked. Ordinary `unblock` cannot
+  release an authorization/lineage quarantine. Neither this command nor an agent's claimed
+  re-scope grants extra budget. Review and hard-case acceptance reject invalid local budget
+  history; the full-run ledger must additionally enforce cross-queue lineage holds.
+- **A specific user-approved revision is not a reset.** The separate operator-only
+  `python -m migration_team.budget_admin --approval <private-receipt> [--apply]` records a
+  one-shot forward allowance after actual user consent; it is deliberately not available
+  through the worker CLI. Queue/task identity, the prior audit, staged input hashes and
+  linked quarantined lineage must match the receipt. Previous attempts are retained and
+  linked attempts are debited, not discarded. A new validation binds its approval ID and
+  required fresh inputs; old reviews cannot satisfy the new revision. An approval file is
+  an accountability record, not authentication or permission for an agent to approve itself.
 
 ---
 
@@ -179,8 +212,10 @@ FIX=tests/fixtures/migration-team
 # 0. Build the validator image once (see Prerequisites).
 docker build -f tools/migration_team/Dockerfile -t o2p-migration-validator:pg16 tools/migration_team
 
-# 1. Fresh queue from the fixture mapping (one queued task).
-python3 tools/migration-team.py init --state "$STATE" --report "$FIX/mapping.csv"
+# 1. Fresh queue from the fixture mapping (one queued task). The fixture's candidate
+#    targets the `contoso` schema, so configure that target up front; validation needs it.
+python3 tools/migration-team.py init --state "$STATE" --report "$FIX/mapping.csv" \
+  --target-schema contoso
 
 # 2. Repair lane claims the next queued task and captures its id from the JSON output.
 #    (Or run `claim` alone, read the "id" field, and set TASK='<that-id>' with quotes.)
@@ -251,13 +286,18 @@ exported text only; not a live database, business-semantic or cutover certificat
 
 ## The hard-case registry
 
-`docs/design.md` predicts, for each of the 43 hard cases `H-01`…`H-43`, whether it converts
-clean, partial, or into a review task. Those are **predictions**. `o2p-hard-cases` turns a
-prediction into a recorded observation — but only when reviewed work backs it.
+`docs/design.md` predicts, for each of the Contoso lab's 43 hard cases `H-01`…`H-43`, whether
+it converts clean, partial, or into a review task. Those 43 are **the lab's sample, not a
+universal list** — another project supplies its own markdown design (`cases --design <md>`) or a
+JSON case catalog with arbitrary case ids (`cases --catalog <catalog.json>`). Either way the
+extracted cases start `not_tested`. `o2p-hard-cases` turns a prediction into a recorded
+observation — but only when reviewed work backs it.
 
 ```bash
-# Extract all 43 cases, each not_tested, with the design's prediction line.
+# Extract the cases (each not_tested) from the bundled lab design...
 python3 tools/migration-team.py cases --output out/mig-demo/hard-cases.json
+# ...or from a project's own catalog instead:
+# python3 tools/migration-team.py cases --catalog my-cases.json --output out/hard-cases.json
 
 # Record an observed assessment — ONLY from reviewed task(s) that actually exercised THIS
 # case. H-01 is "packages with overloaded procedures", so its evidence must be a reviewed
@@ -342,6 +382,10 @@ This queue does not restate, beat, or replace that figure:
 
 These are implementation checks, not a new execution of the full Contoso migration.
 The VS Code UI was not driven in this verification; the live Copilot checks used the CLI.
+
+For the subsequent run against genuine remaining objects and live Oracle measurements,
+see [07 — Remaining-migration team E2E evidence](07-remaining-migration-e2e.md).
+That report distinguishes bounded cohort evidence from the unfinished full migration.
 
 ## Honest limits
 

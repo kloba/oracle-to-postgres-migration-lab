@@ -1,6 +1,18 @@
 # Lab status — what is verified and what is not
 
-**Last updated: 2026-09-07.**
+**Last updated: 2026-09-11.**
+
+> **New bounded runtime evidence:** three historically Not-Converted functions have
+> passed independent Copilot review and a combined local PostgreSQL run with 160 real
+> dependency rows and 69 Oracle-grounded behavior checks. A real 1,100-row product
+> load also exposed and verified a fix for silent XML/object-column omission. See
+> [07 — Remaining-migration team E2E evidence](07-remaining-migration-e2e.md).
+> **The full migration is not complete.** After the bounded run, controlled recovery
+> preserved the stalled converter's artifacts and stopped that converter. Work now
+> continues through dependency-ordered Copilot repairs and new isolated targets;
+> full-schema deployment, all-table data validation, and all 43 hard-case acceptance
+> gates remain unfinished. Passing tooling tests or fixture probes does not close
+> those migration gates. No production cutover or cloud teardown is claimed.
 
 This document exists so you know how much to trust the rest of this repository. It separates
 **what has actually been executed and observed** from **what has only been written down**. Where
@@ -9,14 +21,14 @@ those two disagree, this page records the disagreement rather than smoothing it 
 Read this before you spend money.
 
 > **The short version.** The Oracle side of this lab is real and proven: the schema builds, it is
-> large, it is valid, and it contains the hard cases it claims to. The Azure side has been deployed,
-> verified and destroyed. And as of **2026-09-04 the AI conversion has been run end to end and
+> large, it is valid, and it contains the hard cases it claims to. Earlier Azure runs were deployed,
+> verified and destroyed; the current run's state is described above. As of **2026-09-04 the AI conversion had been run end to end and
 > completed**: the wizard was driven through every step, **1,299 objects were extracted from
 > Oracle**, and `gpt-5.2` converted **947 of 1,185 objects (79.92%) in 2h 56m for 7.2M tokens**. The
 > reports are committed in [docs/conversion-report/](conversion-report/README.md). Doing it found
-> **four defects in this lab**, all now fixed — see §1.10. What is still unfinished: **no data has
-> been migrated**, and nobody has yet compared the report against the 43 per-case predictions in
-> `docs/design.md`.
+> **four defects in this lab**, all now fixed — see §1.10. What is still unfinished: the **full
+> schema/data migration** and a complete assessment of the 43 per-case predictions in
+> `docs/design.md`. The bounded local data and function checks above do not complete those steps.
 
 
 ---
@@ -330,22 +342,27 @@ The conversion has now been run and has produced a report (§1.10,
   done the comparison.** Doing it properly needs a run that did not have to be unstuck by hand.
 - **What `plpgsql_check` actually caught.** The extension is confirmed installed *and loaded* on the
   live server and **Verify Extensions** passes, but the report has not been read for its findings.
-- **Schema Review (step 2) and Application Migration (step 3).** Both visible on the project page,
-  neither run. `review_tasks.md` lists **641 objects needing a manual touch**; none were worked.
-- **GitHub Copilot agent mode on the review-task queue.** Never exercised.
-- **Whether the converted DDL deploys.** 2,268 `.sql` files were produced and a `deploy.sql` exists.
-  It has never been executed against `contoso_store`.
+- **Schema Review (step 2) and Application Migration (step 3).** These wizard steps have not been
+  completed. The historical `review_tasks.md` lists **641 objects needing a manual touch**;
+  the subsequent task reconciliation and bounded repairs are documented in the
+  [remaining-work evidence](07-remaining-migration-e2e.md), not a completed wizard review.
+- **GitHub Copilot agent mode on the review-task queue.** Exercised on genuine-source cohorts,
+  including separate repair/review and data/hard-case lanes. The full queue is not complete.
+- **Whether the complete converted DDL deploys.** The historical run produced 2,268 `.sql` files
+  and a `deploy.sql`. That complete script has not been executed against `contoso_store`;
+  isolated candidate deployments do not establish that it works.
 
-### 2.3 Data migration and validation. Never run.
+### 2.3 Full data migration and validation. Not complete.
 
 - `ora2pg` has never been run; `tools/ora2pg.conf` is untested.
-- **No data has ever been migrated.** A PostgreSQL target server *was* created and its server-level
-  configuration verified — the `azure.extensions` allowlist and `shared_preload_libraries` are
-  confirmed on the live server (§1.7) — but `contoso_store` and `migration_scratch` were left
-  empty: no converted schema, no rows. The database-level `search_path` claim was never applied or
-  checked on a live database.
-- The differential testing method in `docs/05-validate.md` has never been executed. That document
-  describes a method; it does not report results.
+- **Bounded data loads are verified; the full load is not.** Disposable PostgreSQL runs loaded
+  160 genuine TAX_RATE rows and 1,100 PRODUCT rows with the value checks described in
+  [07 — Remaining-migration team E2E evidence](07-remaining-migration-e2e.md). These do not
+  certify the complete 93-table migration. Server allowlists and preload settings (§1.7)
+  likewise do not prove a populated application schema or its database-level configuration.
+- Source/target differential checks have run for those bounded cohorts. The complete
+  acceptance program in `docs/05-validate.md` remains unfinished; its full-schema business,
+  operational, and performance gates still require measured results.
 
 ### 2.4 Cost and timing figures
 
