@@ -16,10 +16,20 @@ def parser():
     init.add_argument('--report', required=True, type=Path)
     init.add_argument('--project', type=Path, help='local archived extension project; no auto-download')
     init.add_argument('--max-workers', type=int, default=2)
-    for name in ('list', 'show', 'claim', 'stage', 'release', 'unblock', 'validate', 'review', 'report'):
+    init.add_argument('--target-schema', action='append', dest='target_schema',
+                      help='target PostgreSQL schema to provision (repeat for several); required before validation')
+    init.add_argument('--source-engine', default='oracle', help='source engine label (only oracle is implemented)')
+    init.add_argument('--target-engine', default='postgresql', help='target engine label (only postgresql is implemented)')
+    conf = sub.add_parser('configure', help='set/migrate target schema(s) and engine labels on an existing queue')
+    conf.add_argument('--state', required=True, type=Path)
+    conf.add_argument('--target-schema', action='append', dest='target_schema',
+                      help='target PostgreSQL schema to provision (repeat for several)')
+    conf.add_argument('--source-engine')
+    conf.add_argument('--target-engine')
+    for name in ('list', 'show', 'audit', 'claim', 'stage', 'release', 'unblock', 'reopen', 'validate', 'review', 'report'):
         cmd = sub.add_parser(name)
         cmd.add_argument('--state', required=True, type=Path)
-        if name in ('show', 'stage', 'release', 'unblock', 'validate', 'review'):
+        if name in ('show', 'audit', 'stage', 'release', 'unblock', 'reopen', 'validate', 'review'):
             cmd.add_argument('--id', required=True)
         if name in ('claim', 'stage', 'release', 'validate'):
             cmd.add_argument('--worker', required=True)
@@ -36,6 +46,10 @@ def parser():
             cmd.add_argument('--reason', required=True)
             if name == 'release':
                 cmd.add_argument('--blocked', action='store_true')
+        elif name == 'reopen':
+            cmd.add_argument('--actor', required=True, help='independent actor invalidating an accepted review')
+            cmd.add_argument('--reason', required=True, help='new regression or changed requirement; does not reset retry budget')
+            cmd.add_argument('--quarantine', action='store_true', help='hold acceptance for an authorization/lineage audit; ordinary unblock cannot release this hold')
         elif name == 'validate':
             cmd.add_argument('--image', default='o2p-migration-validator:pg16')
             cmd.add_argument('--timeout', type=int, default=120)
@@ -48,8 +62,10 @@ def parser():
     compare.add_argument('--target', type=Path, required=True)
     compare.add_argument('--key', action='append', required=True, help='repeat for composite keys')
     compare.add_argument('--output', type=Path)
-    cases = sub.add_parser('cases', help='extract the design hard-case checklist, initially all not_tested')
-    cases.add_argument('--design', type=Path, default=Path(__file__).resolve().parents[2] / 'docs/design.md')
+    cases = sub.add_parser('cases', help='extract a hard-case checklist (markdown design or JSON catalog), initially all not_tested')
+    cases.add_argument('--design', type=Path, default=Path(__file__).resolve().parents[2] / 'docs/design.md',
+                       help='markdown design with case headings (default: the bundled lab example)')
+    cases.add_argument('--catalog', type=Path, help='user-supplied case catalog JSON (alternative to --design)')
     cases.add_argument('--output', type=Path)
     record = sub.add_parser('case-record', help='record a case assessment backed by independently reviewed tasks')
     record.add_argument('--checklist', type=Path, required=True)
@@ -67,18 +83,27 @@ def main(argv=None):
         if args.command == 'compare-data':
             result = compare_exports(args.source, args.target, args.key)
         elif args.command == 'cases':
-            result = hard_cases(args.design)
+            result = hard_cases(args.catalog or args.design, as_catalog=args.catalog is not None)
         elif args.command == 'case-record':
             from .cases import record_case
             result = record_case(args.checklist, args.id, Queue(args.state), args.task, args.outcome, args.note)
         else:
             q = Queue(args.state)
             if args.command == 'init':
-                result = q.initialize(args.report, args.project, args.max_workers)
+                result = q.initialize(args.report, args.project, args.max_workers,
+                                      target_schemas=args.target_schema,
+                                      source_engine=args.source_engine,
+                                      target_engine=args.target_engine)
+            elif args.command == 'configure':
+                result = q.configure(target_schemas=args.target_schema,
+                                     source_engine=args.source_engine,
+                                     target_engine=args.target_engine)
             elif args.command == 'list':
                 result = q.list(args.status)
             elif args.command == 'show':
                 result = q.show(args.id)
+            elif args.command == 'audit':
+                result = q.audit(args.id)
             elif args.command == 'claim':
                 result = q.claim(args.worker, args.id)
             elif args.command == 'stage':
@@ -87,6 +112,8 @@ def main(argv=None):
                 result = q.release(args.id, args.worker, args.reason, args.blocked)
             elif args.command == 'unblock':
                 result = q.unblock(args.id, args.reason)
+            elif args.command == 'reopen':
+                result = q.reopen(args.id, args.actor, args.reason, quarantine=args.quarantine)
             elif args.command == 'validate':
                 if not 1 <= args.timeout <= 1800:
                     raise ValueError('timeout must be between 1 and 1800 seconds')

@@ -92,6 +92,13 @@ done
 
 command -v psql >/dev/null 2>&1 || die "psql is not on PATH" \
     "install the PostgreSQL client, e.g. 'brew install libpq' or 'sudo dnf install postgresql'"
+command -v pg_isready >/dev/null 2>&1 || die "pg_isready is not on PATH" \
+    "it ships with the PostgreSQL client; install that ('brew install libpq' or 'sudo dnf install postgresql')"
+
+# Exit codes a caller (scripts/deploy.sh) can branch on WITHOUT scraping log
+# text: 0 ready, EXIT_UNREACHABLE the server never answered (VNet-private from
+# here), any other non-zero the server answered but a step failed.
+EXIT_UNREACHABLE=3
 
 ENV_FILE="${REPO_ROOT}/.env"
 [[ -f "$ENV_FILE" ]] || die "no .env at ${ENV_FILE}" "cp .env.example .env and fill it in"
@@ -107,6 +114,13 @@ for V in PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGSSLMODE SCRATCH_PGDATABASE
     [[ -n "${!V:-}" ]] && declare "OVERRIDE_${V}=${!V}"
 done
 
+# Capture the caller's pin flag BEFORE sourcing .env. deploy.sh exports
+# O2P_PIN_TARGET=1; a stale or hostile .env line (O2P_PIN_TARGET=0) must not be
+# able to switch OFF a pin the deploy turned ON, and `set -a` below would
+# otherwise let .env overwrite the exported value. We branch on this captured
+# copy, never on the post-.env variable.
+PIN_TARGET="${O2P_PIN_TARGET:-0}"
+
 set -a
 # shellcheck source=/dev/null
 . "$ENV_FILE"
@@ -117,6 +131,22 @@ for V in PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGSSLMODE SCRATCH_PGDATABASE
     [[ -n "${!O:-}" ]] && declare "${V}=${!O}"
 done
 
+# Pinned-target mode (set by scripts/deploy.sh for the post-deploy run): the
+# effective destination must be exactly the host/port we were handed, nothing
+# else. Beyond PGHOST, libpq honours PGHOSTADDR (a raw IP that overrides PGHOST's
+# DNS) and PGSERVICE/PGSERVICEFILE (which can name a different host/port/user/
+# password from a service file). A stale value in any of them -- inherited from
+# the environment, or just restored by the `. .env` above from a previous lab --
+# would carry the freshly deployed admin password to the WRONG server. Clear
+# those channels here, AFTER .env, so .env cannot reintroduce them. We key off
+# the flag captured BEFORE .env, so no .env line can turn the pin off. There is
+# deliberately NO environment opt-out: standalone runs (no pin) keep these
+# channels for legitimate tunnelling; only an explicit deploy-side pin clears
+# them, and only the deploy sets it.
+if [[ "$PIN_TARGET" == "1" ]]; then
+    unset PGHOSTADDR PGSERVICE PGSERVICEFILE
+fi
+
 : "${PGHOST:?PGHOST is not set in .env}"
 : "${PGPASSWORD:?PGPASSWORD is not set in .env}"
 PGPORT="${PGPORT:-5432}"
@@ -125,6 +155,28 @@ PGDATABASE="${PGDATABASE:-contoso_store}"
 PGSSLMODE="${PGSSLMODE:-require}"
 SCRATCH_PGDATABASE="${SCRATCH_PGDATABASE:-migration_scratch}"
 export PGPASSWORD PGSSLMODE
+
+# Distinguish "the server never answered" (VNet-private from here -- an expected
+# outcome when you run this from a laptop, a step to do later) from "the server
+# answered but a step failed" (auth, a missing database, a permission problem, an
+# extension, or plpgsql_check not loaded -- a real failure). pg_isready carries
+# the signal in its EXIT CODE: 0 accepting, 1 rejecting (still a response), 2 no
+# response, 3 no attempt. Grepping libpq's English error text is not portable
+# across locales or client versions, so we never do that.
+probe_reachable() {
+    local rc=0
+    pg_isready --host "$PGHOST" --port "$PGPORT" --timeout 5 >/dev/null 2>&1 || rc=$?
+    [[ "$rc" -eq 2 ]] && return 1
+    return 0
+}
+
+if ! probe_reachable; then
+    hdr "Target ${PGHOST}:${PGPORT}"
+    warn "the server did not respond (pg_isready: no response)"
+    note "expected from a laptop: the flexible server is VNet-private. Open a tunnel"
+    note "(./scripts/connect.sh postgres) or run this from the jumpbox, then re-run."
+    exit "$EXIT_UNREACHABLE"
+fi
 
 # The list the conversion tool asks for, plus the two this lab needs that it
 # does not mention: dblink (PRAGMA AUTONOMOUS_TRANSACTION converts to a dblink
@@ -152,9 +204,10 @@ install_into() {
     hdr "Database ${db}"
 
     local before
-    before="$(psql_q "$db" -c "SELECT count(*) FROM pg_extension;" 2>/dev/null)" \
-        || die "cannot connect to ${db} on ${PGHOST}:${PGPORT} as ${PGUSER}" \
-               "from a laptop the server is private - open a tunnel first: ./scripts/connect.sh postgres"
+    before="$(psql_q "$db" -c "SELECT count(*) FROM pg_extension;")" \
+        || die "reached ${PGHOST}:${PGPORT} but could not query ${db} as ${PGUSER}" \
+               "the server answered (pg_isready passed), so this is not a network problem:
+       check the database name, the login/password, and that ${PGUSER} may CONNECT to ${db}."
     info "${before} extension(s) installed before this run"
 
     if [[ "$CHECK_ONLY" -eq 1 ]]; then

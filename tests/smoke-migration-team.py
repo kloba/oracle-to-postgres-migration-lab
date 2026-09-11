@@ -21,7 +21,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='o2p-team-smoke-') as temp:
         root = Path(temp)
         q = Queue(root / 'queue')
-        q.initialize(fixture / 'mapping.csv', max_workers=2)
+        q.initialize(fixture / 'mapping.csv', max_workers=2, target_schemas=['contoso'])
         task = q.claim('smoke-repair')
         q.stage(task['id'], 'smoke-repair', fixture / 'source.sql', fixture / 'candidate.sql', fixture / 'checks.sql')
         task = q.validate(task['id'], 'smoke-repair', validate, 'o2p-migration-validator:pg16', 120)
@@ -34,7 +34,7 @@ def main():
         # A compiling-but-wrong repair must fail the supplied behavior tests.
         wrong = root / 'wrong.sql'
         wrong.write_text((fixture / 'candidate.sql').read_text().replace('* 1.20', '* 1.30'))
-        failure = validate(wrong, fixture / 'checks.sql', timeout=120)
+        failure = validate(wrong, fixture / 'checks.sql', timeout=120, schemas=['contoso'])
         assert failure['status'] == 'failed', json.dumps(failure)
         assert any(not c['passed'] and c['name'] == 'tax on 100' for c in failure['checks'])
         print('PASS: compiling-but-wrong arithmetic is rejected')
@@ -46,7 +46,7 @@ def main():
                                 'BEGIN RETURN missing_column; END; $$;\n')
         unrelated = root / 'checks.sql'
         unrelated.write_text("SELECT 'unrelated constant' AS check_name, true AS passed;\n")
-        failure = validate(invalid_body, unrelated, timeout=120)
+        failure = validate(invalid_body, unrelated, timeout=120, schemas=['contoso'])
         assert failure['status'] == 'failed', json.dumps(failure)
         assert any(c['name'] == 'deep-check' and not c['passed'] for c in failure['checks'])
         print('PASS: plpgsql_check catches deferred body error')

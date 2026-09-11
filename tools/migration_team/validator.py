@@ -1,6 +1,7 @@
 """Bounded, isolated, non-LLM validation of a converted PostgreSQL candidate.
 
-Contoso Store -- Oracle to Azure Database for PostgreSQL migration lab.
+Oracle -> PostgreSQL migration lab; schema-agnostic (Contoso Store is only the
+bundled example schema, never assumed here).
 
 This is the local, offline analogue of the conversion tool's Stage 4 ("the
 compiler is the arbiter") and Stage 5 (plpgsql_check deep validation); see
@@ -36,11 +37,13 @@ runtime.
 Public contract::
 
     validate(candidate, checks, dependencies=None,
-             image='o2p-migration-validator:pg16', timeout=120) -> dict
+             image='o2p-migration-validator:pg16', timeout=120,
+             schemas=('public',)) -> dict
 
 Result keys: ``status`` ('passed'|'failed'|'blocked'), ``candidate_sha256``,
 ``checks_sha256``, ``dependencies_sha256`` (None when absent), ``engine``
-('postgresql-disposable-container'), ``image``, ``checks`` (list of
+('postgresql-disposable-container'), ``target_engine`` ('postgresql'),
+``target_schemas`` (the provisioned schema list), ``image``, ``checks`` (list of
 {name, passed, detail}), ``log`` (str), ``started_at`` (UTC ISO 8601).
 """
 
@@ -58,11 +61,29 @@ from typing import List, Optional, Tuple
 
 ENGINE = "postgresql-disposable-container"
 DEFAULT_IMAGE = "o2p-migration-validator:pg16"
+# This validator implements the Oracle -> PostgreSQL pair; the disposable server
+# is PostgreSQL. The label is surfaced in the result, not inferred from the SQL.
+TARGET_ENGINE = "postgresql"
 
 # The candidate and behavioural checks run as this non-superuser role; it can
-# CREATE in its schemas but cannot alter the checking extensions or core roles.
+# CREATE in its own target schemas but cannot alter the checking extensions,
+# core roles, or any schema it was not explicitly granted.
 CANDIDATE_ROLE = "o2p_candidate"
-TARGET_DB = "contoso_store"
+# Generic, throwaway scratch database -- deliberately not a real application DB
+# name, so nothing here is tied to one project's schema (e.g. Contoso).
+TARGET_DB = "o2p_scratch"
+
+# Target schemas default to the one PostgreSQL always ships (public) so a
+# standalone validate() call stays backwards compatible; the migration queue
+# requires an explicit configuration instead of guessing one from a CSV.
+DEFAULT_SCHEMAS = ("public",)
+
+# Namespaces we refuse to hand to a candidate: PostgreSQL reserves the pg_
+# prefix, information_schema is the SQL catalog, and 'oracle' is owned by the
+# orafce extension in the image. Any *other* extension/system schema also fails
+# closed, because each non-public target schema is CREATE'd (never CREATE IF NOT
+# EXISTS), so a collision errors rather than silently reusing that namespace.
+RESERVED_SCHEMAS = frozenset({"information_schema", "oracle"})
 
 # Container resource ceilings. Enough for a PL/pgSQL compile + plpgsql_check,
 # small enough that a runaway candidate cannot exhaust the host.
@@ -113,6 +134,75 @@ class _Deadline:
 # --------------------------------------------------------------------------- #
 def _sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _quote_ident(name: str) -> str:
+    """Double-quote a SQL identifier, escaping any embedded quote. Turns any
+    target-schema string -- mixed case, unicode, or an injection attempt like
+    ``x"; DROP SCHEMA public; --`` -- into a single, inert quoted identifier."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def check_schema_names(schemas) -> Tuple[str, ...]:
+    """Validate a target-schema configuration, returning the names unchanged
+    (order preserved) so a caller can persist exactly what the user supplied.
+
+    Raises ValueError with an actionable message for an empty configuration, a
+    non-string/empty/NUL-bearing name, a duplicate, or a reserved namespace
+    (the pg_ prefix, information_schema, or an extension-owned schema)."""
+    names = list(schemas) if schemas is not None else []
+    if not names:
+        raise ValueError("configure at least one target schema")
+    seen = set()
+    for s in names:
+        if not isinstance(s, str) or not s or "\x00" in s:
+            raise ValueError("invalid target schema name: %r" % (s,))
+        folded = s.casefold()
+        if folded.startswith("pg_"):
+            raise ValueError("refusing reserved schema %r: the pg_ prefix is reserved by PostgreSQL" % s)
+        if folded in RESERVED_SCHEMAS:
+            raise ValueError("refusing reserved or extension-owned schema %r" % s)
+        if s in seen:
+            raise ValueError("duplicate target schema %r" % s)
+        seen.add(s)
+    return tuple(names)
+
+
+def _validate_schema_names(schemas) -> None:
+    """check_schema_names, but a bad configuration is an infrastructure block
+    (a 'blocked' verdict) rather than an exception the caller must catch."""
+    try:
+        check_schema_names(schemas)
+    except ValueError as exc:
+        raise _Blocked(str(exc))
+
+
+def _schema_setup_sql(schemas, role: str) -> str:
+    """DDL that provisions each configured target schema for the candidate role.
+
+    ``public`` (which always exists) is granted CREATE/USAGE; every other schema
+    is CREATE'd AUTHORIZATION the role -- with no IF NOT EXISTS, so a name that
+    collides with a system or extension-owned schema fails closed rather than
+    silently reusing someone else's namespace. Names are always quoted."""
+    lines = []
+    for s in schemas:
+        if s == "public":
+            lines.append("GRANT USAGE, CREATE ON SCHEMA public TO %s;" % role)
+        else:
+            lines.append("CREATE SCHEMA %s AUTHORIZATION %s;" % (_quote_ident(s), role))
+    return "\n".join(lines)
+
+
+def _search_path_clause(schemas) -> str:
+    """Build the search_path: the candidate's own schemas first, then public and
+    oracle (orafce) for Oracle-compatibility, each appearing exactly once."""
+    parts = ['"$user"']
+    for s in schemas:
+        parts.append(_quote_ident(s))
+    for extra in ("public", "oracle"):
+        if extra not in schemas:
+            parts.append(extra)
+    return ", ".join(parts)
 
 
 def _has_metacommand(sql: str) -> bool:
@@ -424,10 +514,14 @@ def _psql(name: str, user: str, db: str, sql: str, deadline: _Deadline,
     return _run(cmd, deadline, stdin=sql)
 
 
-def _admin_setup(name: str, password_role: str, deadline: _Deadline) -> str:
-    """Create extensions and the non-superuser candidate role. Returns the
-    server version string. Runs as the postgres superuser; the candidate never
-    sees this SQL (it carries the role password, so it is never logged)."""
+def _admin_setup(name: str, password_role: str, schemas, deadline: _Deadline) -> str:
+    """Create extensions, the non-superuser candidate role, and the configured
+    target schemas. Returns the server version string. Runs as the postgres
+    superuser; the candidate never sees this SQL (it carries the role password,
+    so it is never logged). The candidate role is NOSUPERUSER and owns only the
+    schemas provisioned here -- it is never granted superuser or blanket rights."""
+    schema_sql = _schema_setup_sql(schemas, CANDIDATE_ROLE)
+    search_path = _search_path_clause(schemas)
     sql = f"""
 CREATE EXTENSION IF NOT EXISTS plpgsql_check;
 DO $$ BEGIN
@@ -441,9 +535,8 @@ CREATE ROLE {CANDIDATE_ROLE} LOGIN PASSWORD '{password_role}'
 ALTER ROLE {CANDIDATE_ROLE} SET statement_timeout = '{STATEMENT_TIMEOUT_MS}ms';
 ALTER ROLE {CANDIDATE_ROLE} SET lock_timeout = '{LOCK_TIMEOUT_MS}ms';
 ALTER ROLE {CANDIDATE_ROLE} SET idle_in_transaction_session_timeout = '{IDLE_TX_TIMEOUT_MS}ms';
-CREATE SCHEMA IF NOT EXISTS contoso AUTHORIZATION {CANDIDATE_ROLE};
-GRANT USAGE, CREATE ON SCHEMA public TO {CANDIDATE_ROLE};
-ALTER DATABASE {TARGET_DB} SET search_path = "$user", public, contoso, oracle;
+{schema_sql}
+ALTER DATABASE {TARGET_DB} SET search_path = {search_path};
 """
     res = _psql(name, "postgres", TARGET_DB, sql, deadline)
     if res.returncode != 0:
@@ -583,13 +676,15 @@ def _read_required(path: pathlib.Path, label: str) -> str:
 
 def _result(status: str, candidate_sha: Optional[str], checks_sha: Optional[str],
             deps_sha: Optional[str], image: str, checks: List[dict], log: List[str],
-            started_at: str) -> dict:
+            started_at: str, target_schemas) -> dict:
     return {
         "status": status,
         "candidate_sha256": candidate_sha,
         "checks_sha256": checks_sha,
         "dependencies_sha256": deps_sha,
         "engine": ENGINE,
+        "target_engine": TARGET_ENGINE,
+        "target_schemas": list(target_schemas),
         "image": image,
         "checks": checks,
         "log": "\n".join(log),
@@ -599,16 +694,21 @@ def _result(status: str, candidate_sha: Optional[str], checks_sha: Optional[str]
 
 def validate(candidate: pathlib.Path, checks: pathlib.Path,
              dependencies: Optional[pathlib.Path] = None,
-             image: str = DEFAULT_IMAGE, timeout: int = 120) -> dict:
+             image: str = DEFAULT_IMAGE, timeout: int = 120,
+             schemas=DEFAULT_SCHEMAS) -> dict:
     """Validate a converted PostgreSQL candidate in a disposable container.
 
-    See the module docstring for the full contract. Never raises for a normal
-    validation failure -- those return status 'failed'. Infrastructure problems
-    (Docker/image/container/timeout) and un-assertable checks return 'blocked'.
+    ``schemas`` is the ordered list of target schemas to provision for the
+    candidate role (default ``('public',)`` for a backwards-compatible
+    standalone call). See the module docstring for the full contract. Never
+    raises for a normal validation failure -- those return status 'failed'.
+    Infrastructure problems (Docker/image/container/timeout), an unusable schema
+    configuration, and un-assertable checks return 'blocked'.
     """
     candidate = pathlib.Path(candidate)
     checks = pathlib.Path(checks)
     dependencies = pathlib.Path(dependencies) if dependencies is not None else None
+    schemas = tuple(schemas)
 
     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     deadline = _Deadline(timeout)
@@ -622,7 +722,13 @@ def validate(candidate: pathlib.Path, checks: pathlib.Path,
         log.append("BLOCKED: " + reason)
         return _result("blocked", candidate_sha, checks_sha, deps_sha, image,
                        [{"name": "validation", "passed": False, "detail": reason}],
-                       log, started_at)
+                       log, started_at, schemas)
+
+    # Reject an unusable schema configuration before we pay for a container.
+    try:
+        _validate_schema_names(schemas)
+    except _Blocked as b:
+        return blocked(b.reason)
 
     # File-level gates before we pay for a container.
     try:
@@ -656,8 +762,9 @@ def validate(candidate: pathlib.Path, checks: pathlib.Path,
         _start_container(name, image, deadline)
         log.append(f"container: {name} (image {image_id})")
         _await_ready(name, deadline)
-        version = _admin_setup(name, container_password, deadline)
+        version = _admin_setup(name, container_password, schemas, deadline)
         log.append("server: " + version)
+        log.append("target schemas: " + ", ".join(schemas))
 
         compile_ok, compile_detail = _compile(name, dependencies_sql, candidate_sql, deadline)
         result_checks: List[dict] = [
@@ -690,7 +797,7 @@ def validate(candidate: pathlib.Path, checks: pathlib.Path,
         status = _combine_status(compile_ok, deep_result, beh_result)
         log.append("status: " + status)
         return _result(status, candidate_sha, checks_sha, deps_sha, image,
-                       result_checks, log, started_at)
+                       result_checks, log, started_at, schemas)
     except _Blocked as b:
         return blocked(b.reason)
     finally:

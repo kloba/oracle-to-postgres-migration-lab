@@ -45,6 +45,11 @@ safe — see `docs/04-migrate-data.md` and `docs/05-validate.md`.
 - **You do not migrate data.** `compare-data` reads two CSV files and touches no database. If
   asked to run the actual copy, decline and hand back to the documented data-migration step.
 - Read the CSV header before choosing `--key`; do not assume a column name.
+- **Never fabricate a key column or a table's type.** Keys, the exact column list, and each
+  column's type come from the real supplied schema and exports — for whatever source schema
+  the project actually has, not an assumed one. If you cannot see a genuine key or the real
+  projection, say so and ask for it; a guessed key column or invented type produces a diff
+  that certifies nothing.
 - The result's own scope line is binding: "Exact exported text only; not a live database,
   business-semantic or cutover certification." Quote it; do not upgrade it into a production
   guarantee or a percentage.

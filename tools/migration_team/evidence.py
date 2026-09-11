@@ -75,12 +75,56 @@ def compare_exports(source, target, keys):
             'scope': 'Exact exported text only; not a live database, business-semantic or cutover certification.'}
 
 
-def hard_cases(design):
-    text = Path(design).read_text(encoding='utf-8')
+def _catalog_from_json(text, path):
+    """Normalise a user-supplied case catalog into the checklist shape. Accepts
+    either ``{"cases": [...]}`` or a bare list; each case needs a unique string
+    ``id`` (any scheme -- not the lab's H-NN) plus optional title/prediction."""
+    document = json.loads(text)
+    cases = document.get('cases') if isinstance(document, dict) else document
+    if not isinstance(cases, list) or not cases:
+        raise ValueError('case catalog must be a non-empty list of cases')
+    result = []
+    seen = set()
+    for entry in cases:
+        if not isinstance(entry, dict) or not isinstance(entry.get('id'), str) or not entry['id'].strip():
+            raise ValueError('each catalog case needs a non-empty string id')
+        case_id = entry['id']
+        if case_id in seen:
+            raise ValueError('duplicate case id in catalog: ' + case_id)
+        seen.add(case_id)
+        result.append({'id': case_id,
+                       'heading': entry.get('heading') or entry.get('title') or case_id,
+                       'prediction': entry.get('prediction'),
+                       'status': 'not_tested', 'task_ids': [], 'evidence': None})
+    return {'design_sha256': file_hash(path), 'cases': result,
+            'scope': 'Predictions are not observed outcomes. Attach source/target behavior evidence per case.'}
+
+
+def hard_cases(source, as_catalog=None):
+    """Extract a hard-case checklist from a design/catalog.
+
+    ``as_catalog`` selects the format explicitly: True forces the JSON-catalog
+    reader, False forces the markdown-design reader. When it is None (a direct
+    caller that has not said which), the format is auto-detected from the first
+    non-whitespace character. A caller that already knows -- the CLI, which has
+    separate ``--catalog`` and ``--design`` flags -- should pass it, so that a
+    markdown design whose first non-blank character is ``[`` (e.g. a ``[TOC]``
+    marker or a ``[ref]: url`` reference link) is read as the markdown design it
+    is instead of being misrouted to the JSON reader.
+
+    A JSON catalog uses arbitrary case ids; otherwise the file is a markdown
+    design whose ``### <ID>`` headings name the cases (the bundled lab design
+    uses H-NN, but any ``letters-digits`` id is accepted)."""
+    path = Path(source)
+    text = path.read_text(encoding='utf-8')
+    if as_catalog is None:
+        as_catalog = text.lstrip()[:1] in ('{', '[')
+    if as_catalog:
+        return _catalog_from_json(text, path)
     # Only actual headings; appearances in predictions and prose are not new cases.
-    headings = list(re.finditer(r'^###\s+(H-\d{2})\b[^\n]*', text, re.MULTILINE))
+    headings = list(re.finditer(r'^###\s+([A-Za-z][A-Za-z0-9]*-\d+)\b[^\n]*', text, re.MULTILINE))
     if not headings:
-        raise ValueError('no H-NN headings found in design document')
+        raise ValueError('no case-id headings (e.g. ### H-01) found in design document')
     result = []
     seen = set()
     for i, match in enumerate(headings):
@@ -94,5 +138,5 @@ def hard_cases(design):
         result.append({'id': case_id, 'heading': match.group(0).lstrip('# '),
                        'prediction': prediction.group(0).strip() if prediction else None,
                        'status': 'not_tested', 'task_ids': [], 'evidence': None})
-    return {'design_sha256': file_hash(design), 'cases': result,
+    return {'design_sha256': file_hash(path), 'cases': result,
             'scope': 'Predictions are not observed outcomes. Attach source/target behavior evidence per case.'}

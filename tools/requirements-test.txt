@@ -1,0 +1,6 @@
+# Test runner only; the generators remain standard-library-only.
+# The migration suite includes both unittest.TestCase classes and pytest
+# functions/fixtures. Run both through pytest so controller tests are not omitted.
+# Install with: python3 -m pip install -r tools/requirements-test.txt
+# Verify range changes with tests/run-tests.sh --strict.
+pytest>=8.3,<10

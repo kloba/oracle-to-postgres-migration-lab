@@ -200,7 +200,11 @@ kv_or_env() {
     [[ "${USE_KEYVAULT:-0}" == "1" ]] || return 0
     eval "secret=\${${kvvar}:-}"
     [[ -n "${AZ_KEYVAULT_NAME:-}" && -n "$secret" ]] || return 0
-    az keyvault secret show --vault-name "$AZ_KEYVAULT_NAME" --name "$secret" --query value -o tsv 2>/dev/null || true
+    # Pin the vault lookup to the deployment's subscription, not the ambient az
+    # default; the secret value is captured, never printed.
+    resolve_lab_subscription
+    az keyvault secret show ${LAB_SUB_ARGS[@]+"${LAB_SUB_ARGS[@]}"} \
+        --vault-name "$AZ_KEYVAULT_NAME" --name "$secret" --query value -o tsv 2>/dev/null || true
 }
 
 # free_port <start>
@@ -288,9 +292,47 @@ out() {
     jq -r --arg k "$1" '.[$k] // empty' "$OUTPUTS" 2>/dev/null || true
 }
 
+# --- which Azure subscription? (o2p) ----------------------------------------
+# The active `az` subscription is global, mutable state: an `az login` in another
+# terminal, or a teammate's `az account set`, silently repoints every
+# `az ... --resource-group` lookup at the WRONG subscription, and a resource that
+# plainly exists then reports "not found" - which is exactly how this script
+# failed to find o2p-oracle-vm after the default drifted. We never trust it and
+# never run `az account set`. Instead we pin each az call with --subscription,
+# taking the subscription from the deployment itself: every full resource id in
+# generated/outputs.json (oracleVmId, ...) begins /subscriptions/<guid>/. A
+# configured AZ_SUBSCRIPTION_ID that disagrees with the deployed one is a stop,
+# not a guess. Resolution is lazy so the local-only targets never pay for it.
+LAB_SUBSCRIPTION=''
+LAB_SUB_ARGS=()
+_LAB_SUB_RESOLVED=0
+sub_of() {   # sub_of <azure-resource-id> -> the subscription guid, or nothing
+    local id="${1:-}"
+    [[ "$id" == /subscriptions/* ]] || return 0
+    id="${id#/subscriptions/}"
+    printf '%s' "${id%%/*}"
+}
+resolve_lab_subscription() {
+    [[ "$_LAB_SUB_RESOLVED" -eq 0 ]] || return 0
+    _LAB_SUB_RESOLVED=1
+    local from_out from_env="${AZ_SUBSCRIPTION_ID:-}"
+    from_out="$(sub_of "$(out oracleVmId)")"
+    # .env.example ships the all-zeros placeholder; treat it as unset.
+    [[ "$from_env" == "00000000-0000-0000-0000-000000000000" ]] && from_env=''
+    if [[ -n "$from_out" && -n "$from_env" && "$from_out" != "$from_env" ]]; then
+        die "generated/outputs.json was deployed in subscription ${from_out}, not AZ_SUBSCRIPTION_ID (${from_env})" \
+            "reconcile them: fix AZ_SUBSCRIPTION_ID in ${ENV_FILE}, or re-run scripts/deploy.sh.
+       Refusing to guess which subscription to reach."
+    fi
+    LAB_SUBSCRIPTION="${from_out:-$from_env}"
+    [[ -n "$LAB_SUBSCRIPTION" ]] && LAB_SUB_ARGS=(--subscription "$LAB_SUBSCRIPTION")
+    return 0
+}
+
 # open_tunnel <bastion> <rg> <target-resource-id> <remote-port> <local-port>
 open_tunnel() {
     local bastion="$1" rg="$2" resid="$3" rport="$4" lport="$5" waited=0
+    resolve_lab_subscription
     info "Bastion tunnel 127.0.0.1:${lport} -> ${rport}"
     # `set -m` (job control) puts the background job in a process group of its
     # own, which is the only handle that survives the non-exec `az` wrapper.
@@ -300,7 +342,8 @@ open_tunnel() {
     # process there that reads the controlling terminal is stopped with
     # SIGTTIN, and it must never compete for keystrokes with the interactive
     # SQL*Plus or psql session this tunnel exists to carry.
-    az network bastion tunnel --name "$bastion" --resource-group "$rg" \
+    az network bastion tunnel ${LAB_SUB_ARGS[@]+"${LAB_SUB_ARGS[@]}"} \
+        --name "$bastion" --resource-group "$rg" \
         --target-resource-id "$resid" --resource-port "$rport" --port "$lport" \
         </dev/null >/dev/null 2>&1 &
     TUNNEL_PID=$!
@@ -410,6 +453,7 @@ oracle-azure)
     az account show >/dev/null 2>&1 || die "Azure CLI is not logged in" "az login"
     [[ -f "$OUTPUTS" ]] || die "generated/outputs.json not found" \
         "run scripts/deploy.sh first - it writes the connection details this script reads"
+    resolve_lab_subscription
 
     RG="$(out resourceGroupName)"; RG="${RG:-${AZ_RESOURCE_GROUP:-${PREFIX}-migration-lab-rg}}"
     BASTION="$(out bastionName)"; BASTION="${BASTION:-${PREFIX}-bastion}"
@@ -422,7 +466,8 @@ oracle-azure)
         "scripts/deploy.sh generates it; set SSH_KEY_PATH in .env if yours is elsewhere"
 
     if [[ -z "$VM_ID" ]]; then
-        VM_ID="$(az vm show --resource-group "$RG" --name "$VM_NAME" --query id -o tsv 2>/dev/null || true)"
+        VM_ID="$(az vm show ${LAB_SUB_ARGS[@]+"${LAB_SUB_ARGS[@]}"} \
+            --resource-group "$RG" --name "$VM_NAME" --query id -o tsv 2>/dev/null || true)"
     fi
     [[ -n "$VM_ID" ]] || die "cannot find VM '${VM_NAME}' in resource group '${RG}'" \
         "az vm list --resource-group '${RG}' -o table"
@@ -536,6 +581,7 @@ postgres|scratch)
         az account show >/dev/null 2>&1 || die "Azure CLI is not logged in" "az login"
         [[ -f "$OUTPUTS" ]] || die "generated/outputs.json not found" \
             "run scripts/deploy.sh first, or use --direct if you are pointing at your own server"
+        resolve_lab_subscription
 
         RG="$(out resourceGroupName)"; RG="${RG:-${AZ_RESOURCE_GROUP:-${PREFIX}-migration-lab-rg}}"
         BASTION="$(out bastionName)"; BASTION="${BASTION:-${PREFIX}-bastion}"
@@ -545,7 +591,15 @@ postgres|scratch)
         [[ -f "$SSH_KEY" ]] || die "no SSH private key at ${SSH_KEY}" \
             "scripts/deploy.sh generates it; set SSH_KEY_PATH in .env if yours is elsewhere"
 
-        VM_ID="$(az vm show --resource-group "$RG" --name "$VM_NAME" --query id -o tsv 2>/dev/null || true)"
+        # Reuse the VM's full resource id straight from outputs.json: it names its
+        # own subscription, so the jump host resolves no matter what the active az
+        # default is. Only fall back to a name lookup - pinned to the deployment's
+        # subscription - for an older outputs.json written before oracleVmId.
+        VM_ID="$(out oracleVmId)"
+        if [[ -z "$VM_ID" ]]; then
+            VM_ID="$(az vm show ${LAB_SUB_ARGS[@]+"${LAB_SUB_ARGS[@]}"} \
+                --resource-group "$RG" --name "$VM_NAME" --query id -o tsv 2>/dev/null || true)"
+        fi
         [[ -n "$VM_ID" ]] || die "cannot find the Oracle VM '${VM_NAME}' in '${RG}' to jump through" \
             "az vm list --resource-group '${RG}' -o table
        or use --direct if the server has public network access enabled"

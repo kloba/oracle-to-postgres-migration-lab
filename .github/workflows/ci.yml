@@ -61,6 +61,20 @@ jobs:
           # runner image quietly moving underneath us.
           python-version: '3.12'
 
+      - name: Install test dependencies
+        run: |
+          # The migration-team check runs its regressions under pytest, because
+          # tests/test_migration_full_run.py uses pytest fixtures that
+          # `unittest discover` cannot collect. This is the ONLY test-time
+          # dependency; the generators stay standard-library only
+          # (tools/requirements.txt), and pytest is never imported by anything
+          # under tools/. Version-range-bounded (not byte-pinned like shellcheck
+          # below): pytest releases do not add findings that flip these tests, so
+          # a bump cannot redden a build a laptop passed. See
+          # tools/requirements-test.txt for the full reasoning.
+          python3 -m pip install --disable-pip-version-check -r tools/requirements-test.txt
+          python3 -m pytest --version
+
       - name: Install shellcheck
         run: |
           # Pin shellcheck to an exact version. ubuntu-latest ships its own, but
