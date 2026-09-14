@@ -1,6 +1,15 @@
 # Lab status — what is verified and what is not
 
-**Last updated: 2026-09-11.**
+**Last updated: 2026-09-14.**
+
+> **Current VS Code run:** the converter completed all **105 chunks**, reporting
+> **93.02% standalone-object conversion**, after infrastructure interruptions and
+> checkpoint-preserving recovery. Blocking artifact findings and full schema/data
+> acceptance remain unresolved. The real Copilot team independently reviewed three
+> routines and one structural table; 70 function observations and a 5,600-row,
+> all-column table comparison passed in fresh local targets.
+> See [08 — VS Code migration and agent continuation](08-vscode-migration-20260913.md)
+> for the measured result and its limits. Historical results below are separate runs.
 
 > **New bounded runtime evidence:** three historically Not-Converted functions have
 > passed independent Copilot review and a combined local PostgreSQL run with 160 real

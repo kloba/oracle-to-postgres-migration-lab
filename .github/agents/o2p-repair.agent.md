@@ -17,10 +17,14 @@ Work one task at a time. All commands take `--state <dir>`.
 
 ## The lane, in order
 
-1. **Claim.** `claim --state <dir> --worker <your-id> [--id <task>]`. With no `--id` you get
-   the next queued task. Pick a stable `--worker` string for yourself (for example
-   `o2p-repair` or `o2p-repair-a`) and reuse it for stage/validate/release on this task —
-   the queue checks you still own it.
+1. **Check the budget, then claim.** Use `show --state <dir> --id <task>` and, when
+   needed, `audit --state <dir> --id <task>` to inspect the recorded lifetime budget
+   and quarantine before claiming. A `queued` label does not authorize another
+   attempt when `validation_budget.can_validate` is false. Then use
+   `claim --state <dir> --worker <your-id> [--id <task>]`. With no `--id` you get
+   the next queued task; check its budget before staging or validating. Pick a
+   stable `--worker` string (for example `o2p-repair` or `o2p-repair-a`) and reuse it
+   for stage/validate/release — the queue checks you still own it.
 2. **Get the *original* Oracle DDL.** Read it from the archived extension project passed to
    `init --project`, or from the source system. If you cannot obtain the genuine source,
    **stop and block** (step 6) — do not reconstruct DDL from the mapping CSV and present it
@@ -28,7 +32,13 @@ Work one task at a time. All commands take `--state <dir>`.
    makes every downstream finding worthless. Run `show --state <dir> --id <task>` to see the
    object's type, name, and mappings.
 3. **Author the candidate and the checks.**
-   - `candidate.sql` — your PostgreSQL rewrite of the object.
+   - `candidate.sql` — your PostgreSQL rewrite of the object. The disposable
+     validator already creates the configured target schemas for its bounded
+     candidate role. Neither candidate nor dependency SQL should prepend
+     `CREATE SCHEMA`, even `IF NOT EXISTS`: PostgreSQL
+     still requires database-level CREATE permission. A resulting `permission denied
+     for database o2p_scratch` compile error is not proof of a missing CONNECT grant.
+     Remove redundant setup SQL; do not widen privileges or recreate the database.
    - `checks.sql` — a **single** read-only `SELECT`/`WITH` query returning exactly two
      columns, `check_name` and `passed` (boolean). No psql metacommands (backslash lines),
      no `DO` blocks; the validator forces those two columns and machine-parses the CSV, so
@@ -39,11 +49,12 @@ Work one task at a time. All commands take `--state <dir>`.
      the same transaction before it.
 4. **Stage.** `stage --state <dir> --id <task> --worker <your-id> --source <oracle.sql> --candidate <pg.sql> --checks <checks.sql> [--dependencies <deps.sql>]`.
    `--source` is required and is stored for the reviewer; it is **never executed**.
-5. **Validate.** First build the image once (the validator never builds or pulls it):
-   ```
-   docker build -f tools/migration_team/Dockerfile -t o2p-migration-validator:pg16 tools/migration_team
-   ```
-   Then `validate --state <dir> --id <task> --worker <your-id> [--image o2p-migration-validator:pg16] [--timeout 120]`.
+5. **Validate.** Use the existing operator-prepared image (the validator never
+   builds or pulls it). A missing image is a setup blocker: report it for an
+   explicitly authorized operator build, following `docs/06-copilot-migration-team.md`.
+   Do not run an unconditional build, retry denied raw Docker commands, or infer a
+   missing image from an unrelated SQL permission error.
+   Run `validate --state <dir> --id <task> --worker <your-id> [--image o2p-migration-validator:pg16] [--timeout 120]`.
    - `passed` -> task becomes `pending_review`. Hand off to the reviewer; **you do not
      approve it.**
    - `failed` -> your candidate compiled wrong or an assertion was false; the task returns to
@@ -51,11 +62,15 @@ Work one task at a time. All commands take `--state <dir>`.
      re-stage, and re-validate.
    - `blocked` -> infrastructure or an un-assertable check (Docker down, image missing,
      timeout, non-boolean check output). Fix the setup, not the verdict.
-   You get **three validate attempts per task** (the counter increments on every attempt,
-   pass or fail). After the third, the queue refuses more: *"three validation attempts used;
-   release --blocked with the remaining issue before a coordinator unblocks it"*. That is your
-   signal to **stop and block** (step 6), not to keep trying — only a coordinator `unblock`,
-   with a genuine fix, resets the counter.
+   The default budget is **three lifetime validation attempts per task**, including
+   failed, blocked, and interrupted attempts. Follow the actual recorded budget from
+   `show`/`audit`. When exhausted, **stop**. If you already own a claimed task,
+   release it blocked (step 6); if it is still queued or belongs to someone else,
+   report the blocker without claiming or releasing it. Coordinator `unblock`
+   retains the attempt history and refuses exhausted or quarantined tasks; it does
+   **not** reset the counter. Do not create replacement queues, rename a lineage, or
+   issue yourself a new grant. Any additional allowance requires a separate actual
+   user-approved operator receipt, never an agent's assertion of approval.
    The queue records the SHA-256 of every staged file with the evidence; if you edit any
    staged file after validating, the evidence goes stale and review will reject it. Re-stage
    and re-validate after any edit.
@@ -72,10 +87,11 @@ Work one task at a time. All commands take `--state <dir>`.
   only this charter and the CLI.
 - **Never approve your own work.** Review is a separate identity and a separate agent
   (`o2p-reviewer`). The queue rejects a reviewer whose name equals this task's worker.
-- **Respect the three-attempt validation budget.** Three failed validations means the repair
-  needs a decision or a dependency you do not have — `release --blocked` with the specific
-  remaining issue and report it. Never thrash the validator hoping it turns green, and never
-  seek a way around the cap.
+- **Respect the recorded lifetime validation budget.** An exhausted budget means the repair
+  needs a decision or a dependency you do not have. Report the specific remaining issue;
+  use `release --blocked` only for a claimed task you already own. Never thrash the
+  validator hoping it turns green, and never
+  seek a way around the cap. Neither `unblock` nor a new queue resets lifetime use.
 - **Never fabricate source DDL** to satisfy `--source`. Missing original = block.
 - Use only the flags shown above. Do not pass concurrency flags, and do not edit the
   validator or queue internals to change a verdict.
